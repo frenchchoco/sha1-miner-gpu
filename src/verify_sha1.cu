@@ -214,12 +214,15 @@ void performance_check() {
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    const int blocks = 256;
-    const int threads = 256;
-    const int iterations = 100000;
+    const int blocks = 16384;
+    const int threads = 256; // must not exceed __launch_bounds__(256,2)
+    const int iterations = 1; // long enough to get >100 ms
+
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
 
     CUDA_CHECK(cudaEventRecord(start));
-    for (int i = 0; i < iterations; i++) {
+    for (int i = 0; i < iterations; ++i) {
         sha1_collision_kernel_ultra<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
     }
     CUDA_CHECK(cudaEventRecord(stop));
@@ -228,12 +231,15 @@ void performance_check() {
     float ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
 
-    uint64_t total_hashes = (uint64_t) blocks * threads * iterations * 4; // 4 nonces per thread
-    double ghps = total_hashes / (ms / 1000.0) / 1e9;
+    uint64_t total_hashes =
+            (uint64_t) blocks * threads * iterations * 16;
 
-    std::cout << "Hashes computed: " << total_hashes << "\n";
-    std::cout << "Time: " << ms << " ms\n";
-    std::cout << "Performance: " << ghps << " GH/s\n";
+    double ghps = total_hashes / (ms * 1e6); // ms→s and hashes→giga
+
+    std::cout << "Hashes computed : " << total_hashes << '\n'
+            << "Time            : " << ms << " ms\n"
+            << "Performance     : " << std::fixed << std::setprecision(1)
+            << ghps << " GH/s\n";
 
     if (ghps < 0.1) {
         std::cout << "WARNING: Performance seems too low!\n";

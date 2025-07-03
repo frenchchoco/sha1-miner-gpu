@@ -18,7 +18,7 @@ __device__ __constant__ uint32_t g_target[5];
 #define H4 0xC3D2E1F0u
 
 // Configuration
-#define NONCES_PER_THREAD 32
+#define NONCES_PER_THREAD 16
 #define HASHES_PER_BATCH 4
 
 // =================================================================
@@ -297,8 +297,11 @@ __device__ void handle_matches_warp_optimized(
     uint32_t matches,
     const uint32_t M1[8], const uint32_t M2[8],
     const uint32_t M3[8], const uint32_t M4[8],
-    uint64_t *out_pairs, uint32_t *ticket
-) {
+    uint64_t *out_pairs,
+    uint32_t *blk_ticket, // <- shared counter (pointer!)
+    uint32_t *blk_base, // <- shared base index (pointer!)
+    uint32_t *global_ticket) // <- original global ticket
+{
     if (!matches) return;
 
     // Count total matches in warp
@@ -317,11 +320,24 @@ __device__ void handle_matches_warp_optimized(
     total_matches = __shfl_sync(0xFFFFFFFF, total_matches, 0);
 
     // Leader reserves space
-    uint32_t base_pos;
+    uint32_t base_pos; // <- re-added
+
+    // Leader reserves (or flushes) space in the **block buffer**
     if ((threadIdx.x & 31) == 0) {
-        base_pos = atomicAdd(ticket, total_matches);
+        base_pos = atomicAdd(blk_ticket, total_matches);
+
+        // will the buffer overflow?
+        if (base_pos + total_matches > 1024) {
+            if (threadIdx.x == 0) {
+                uint32_t old = atomicAdd(global_ticket, *blk_ticket);
+                *blk_base = old; // new global base for this block
+                *blk_ticket = 0; // reset local counter
+                base_pos = 0; // start writing at buffer front
+            }
+        }
     }
-    base_pos = __shfl_sync(0xFFFFFFFF, base_pos, 0);
+
+    base_pos = *blk_base + __shfl_sync(0xFFFFFFFF, base_pos, 0);
 
     // Calculate write position with prefix sum
     uint32_t thread_offset = 0;
@@ -373,11 +389,91 @@ __device__ void handle_matches_warp_optimized(
     }
 }
 
+// -----------------------------------------------------------------
+// Dual SHA-1 transform  (2 digests per thread)
+// -----------------------------------------------------------------
+__device__ inline void sha1_dual_transform(
+    const uint32_t M1[8], const uint32_t M2[8],
+    uint32_t out1[5], uint32_t out2[5]) {
+    uint32_t a1 = H0, b1 = H1, c1 = H2, d1 = H3, e1 = H4;
+    uint32_t a2 = H0, b2 = H1, c2 = H2, d2 = H3, e2 = H4;
+
+    uint32_t W1[16], W2[16];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        W1[i] = bswap32(M1[i]);
+        W2[i] = bswap32(M2[i]);
+    }
+    W1[8] = W2[8] = 0x80000000u;
+#pragma unroll
+    for (int i = 9; i < 15; i++) W1[i] = W2[i] = 0;
+    W1[15] = W2[15] = 0x00000100u;
+
+#pragma unroll 2
+    for (int i = 0; i < 80; i++) {
+        uint32_t wi1, wi2;
+        if (i < 16) {
+            wi1 = W1[i];
+            wi2 = W2[i];
+        } else {
+            wi1 = rotl32(W1[(i - 3) & 15] ^ W1[(i - 8) & 15] ^
+                         W1[(i - 14) & 15] ^ W1[(i - 16) & 15], 1);
+            wi2 = rotl32(W2[(i - 3) & 15] ^ W2[(i - 8) & 15] ^
+                         W2[(i - 14) & 15] ^ W2[(i - 16) & 15], 1);
+            W1[i & 15] = wi1;
+            W2[i & 15] = wi2;
+        }
+
+        uint32_t f1, f2, k;
+        if (i < 20) {
+            f1 = sha1_f1(b1, c1, d1);
+            f2 = sha1_f1(b2, c2, d2);
+            k = K0;
+        } else if (i < 40) {
+            f1 = sha1_f2(b1, c1, d1);
+            f2 = sha1_f2(b2, c2, d2);
+            k = K1;
+        } else if (i < 60) {
+            f1 = sha1_f3(b1, c1, d1);
+            f2 = sha1_f3(b2, c2, d2);
+            k = K2;
+        } else {
+            f1 = sha1_f2(b1, c1, d1);
+            f2 = sha1_f2(b2, c2, d2);
+            k = K3;
+        }
+
+        uint32_t t1 = rotl32(a1, 5) + f1 + e1 + k + wi1;
+        uint32_t t2 = rotl32(a2, 5) + f2 + e2 + k + wi2;
+
+        e1 = d1;
+        d1 = c1;
+        c1 = rotl32(b1, 30);
+        b1 = a1;
+        a1 = t1;
+        e2 = d2;
+        d2 = c2;
+        c2 = rotl32(b2, 30);
+        b2 = a2;
+        a2 = t2;
+    }
+    out1[0] = a1 + H0;
+    out1[1] = b1 + H1;
+    out1[2] = c1 + H2;
+    out1[3] = d1 + H3;
+    out1[4] = e1 + H4;
+    out2[0] = a2 + H0;
+    out2[1] = b2 + H1;
+    out2[2] = c2 + H2;
+    out2[3] = d2 + H3;
+    out2[4] = e2 + H4;
+}
+
 // =================================================================
 // Main Optimized Kernel with Quad Processing
 // =================================================================
 
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 2)
 void sha1_collision_kernel_ultra(
     uint8_t * __restrict__ out_msgs,
     uint64_t * __restrict__ out_pairs,
@@ -386,10 +482,25 @@ void sha1_collision_kernel_ultra(
 ) {
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Load target into shared memory
+    // ------------------------------------------------------------------
+    // 1.  per-block broadcast of the target (already in your code)
+    // ------------------------------------------------------------------
     __shared__ uint32_t shared_target[5];
-    if (threadIdx.x < 5) {
+    if (threadIdx.x < 5)
         shared_target[threadIdx.x] = g_target[threadIdx.x];
+    __syncthreads();
+
+    // ------------------------------------------------------------------
+    // 2.  NEW: per-block ticket buffer & base pointer
+    //     (lifetime: entire kernel launch, scope: one thread-block)
+    // ------------------------------------------------------------------
+    __shared__ uint32_t blk_ticket; // how many matches the block has queued
+    __shared__ uint32_t blk_base; // base index in the global out_pairs array
+
+    if (threadIdx.x == 0) {
+        // initialise once per block
+        blk_ticket = 0;
+        blk_base = 0;
     }
     __syncthreads();
 
@@ -429,19 +540,28 @@ void sha1_collision_kernel_ultra(
         M4[7] = M_base[7] ^ (uint32_t) (nonce4 >> 32);
 
         // Compute 4 SHA-1 hashes in parallel
-        uint32_t hash1[5], hash2[5], hash3[5], hash4[5];
-        sha1_quad_transform(M1, M2, M3, M4, hash1, hash2, hash3, hash4);
+        uint32_t h1[5], h2[5], h3[5], h4[5];
+        sha1_dual_transform(M1, M2, h1, h2);
+        sha1_dual_transform(M3, M4, h3, h4);
 
         // Check all 4 matches
         uint32_t matches = 0;
-        matches |= check_match_vectorized(hash1, shared_target) << 0;
-        matches |= check_match_vectorized(hash2, shared_target) << 1;
-        matches |= check_match_vectorized(hash3, shared_target) << 2;
-        matches |= check_match_vectorized(hash4, shared_target) << 3;
+        matches |= check_match_vectorized(h1, shared_target) << 0;
+        matches |= check_match_vectorized(h2, shared_target) << 1;
+        matches |= check_match_vectorized(h3, shared_target) << 2;
+        matches |= check_match_vectorized(h4, shared_target) << 3;
 
         // Handle matches with warp-level coordination
         if (__any_sync(0xFFFFFFFF, matches)) {
-            handle_matches_warp_optimized(matches, M1, M2, M3, M4, out_pairs, ticket);
+            handle_matches_warp_optimized(matches, M1, M2, M3, M4,
+                                          out_pairs,
+                                          &blk_ticket, &blk_base, // NEW
+                                          ticket); // global
         }
+    }
+
+    if (threadIdx.x == 0 && blk_ticket) {
+        atomicAdd(ticket, blk_ticket); // reserve space once
+        /* blk_base already updated inside handle_matches_warp_optimized */
     }
 }
