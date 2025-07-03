@@ -50,13 +50,7 @@ target_include_directories(miner PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(miner PRIVATE jobupload kernel sha1lib CUDA::cudart)
 set_target_properties(miner PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-# bench
-add_executable(bench src/bench.cu)
-target_include_directories(bench PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(bench PRIVATE jobupload kernel sha1lib CUDA::cudart)
-set_target_properties(bench PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-# verify - verification tool
+# verify - verification tool (CUDA file)
 add_executable(verify src/verify_sha1.cu)
 target_include_directories(verify PRIVATE ${CMAKE_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS})
 target_link_libraries(verify PRIVATE jobupload kernel sha1lib CUDA::cudart)
@@ -71,7 +65,7 @@ configure_file(${CMAKE_SOURCE_DIR}/scripts/verify_sha1.py
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_ok LANGUAGES CXX)
 if (ipo_ok)
-    set_property(TARGET miner bench kernel verify PROPERTY
+    set_property(TARGET miner verify PROPERTY
             INTERPROCEDURAL_OPTIMIZATION
             $<BOOL:$<NOT:$<CONFIG:Debug>>>)
 endif ()
@@ -85,7 +79,6 @@ message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 message(STATUS "")
 message(STATUS "Targets:")
-message(STATUS "  miner  - Main SHA-1 collision finder")
-message(STATUS "  bench  - Performance benchmark")
-message(STATUS "  verify - Verification tool")
+message(STATUS "  miner      - Main SHA-1 collision finder")
+message(STATUS "  verify     - Verification tool")
 message(STATUS "")
