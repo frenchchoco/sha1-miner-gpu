@@ -14,11 +14,6 @@ def sha1(data):
     return hashlib.sha1(data).digest()
 
 
-def double_sha1(data):
-    """Double SHA-1 hash (SHA1(SHA1(data)))"""
-    return sha1(sha1(data))
-
-
 def hex_to_bytes(hex_str):
     """Convert hex string to bytes"""
     return bytes.fromhex(hex_str.replace(' ', ''))
@@ -35,7 +30,7 @@ def verify_test_vectors():
 
     # Test 1: Zero message
     msg1 = b'\x00' * 32
-    hash1 = double_sha1(msg1)
+    hash1 = sha1(msg1)
     print(f"Test 1 - Zero message (32 bytes):")
     print(f"Message: {bytes_to_hex(msg1)}")
     print(f"SHA-1^2: {bytes_to_hex(hash1)}")
@@ -43,7 +38,7 @@ def verify_test_vectors():
 
     # Test 2: Sequential bytes
     msg2 = bytes(range(32))
-    hash2 = double_sha1(msg2)
+    hash2 = sha1(msg2)
     print(f"Test 2 - Sequential bytes (0x00-0x1f):")
     print(f"Message: {bytes_to_hex(msg2)}")
     print(f"SHA-1^2: {bytes_to_hex(hash2)}")
@@ -51,7 +46,7 @@ def verify_test_vectors():
 
     # Test 3: Bitcoin script puzzle example
     msg3 = bytes(range(32))  # Standard test message
-    hash3 = double_sha1(msg3)
+    hash3 = sha1(msg3)
     print(f"Test 3 - Standard test message:")
     print(f"Message: {bytes_to_hex(msg3)}")
     print(f"SHA-1^2: {bytes_to_hex(hash3)}")
@@ -64,8 +59,8 @@ def verify_collision(msg1_hex, msg2_hex):
     msg1 = hex_to_bytes(msg1_hex)
     msg2 = hex_to_bytes(msg2_hex)
 
-    hash1 = double_sha1(msg1)
-    hash2 = double_sha1(msg2)
+    hash1 = sha1(msg1)
+    hash2 = sha1(msg2)
 
     print(f"Message 1: {msg1_hex}")
     print(f"SHA-1^2:   {bytes_to_hex(hash1)}")
@@ -91,7 +86,7 @@ def generate_test_cases():
     for i in range(5):
         msg = bytes([j for j in range(32)])
         msg = msg[:-4] + struct.pack('<I', i)  # Modify last 4 bytes
-        hash_val = double_sha1(msg)
+        hash_val = sha1(msg)
         test_cases.append((msg, hash_val))
 
     print("Test messages and their double SHA-1 hashes:")
@@ -122,7 +117,7 @@ def check_gpu_output_file(filename="found_collisions.txt"):
             # Verify each one
             for i, (msg_hex, hash_hex) in enumerate(zip(candidates, hashes)):
                 msg = hex_to_bytes(msg_hex)
-                computed_hash = double_sha1(msg)
+                computed_hash = sha1(msg)
                 expected_hash = hex_to_bytes(hash_hex)
 
                 print(f"\nCandidate {i + 1}:")
