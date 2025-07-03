@@ -13,8 +13,7 @@
 #include <mutex>
 
 #include "job_upload_api.h"
-#include "cxxsha1.hpp"
-#include "job_constants.cuh"
+#include "cxxsha1.cpp"
 
 // Kernel declaration
 extern "C" __global__ void sha1_double_kernel_optimized(uint8_t *, uint64_t *, uint32_t *, uint64_t);
