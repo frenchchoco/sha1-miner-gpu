@@ -22,12 +22,12 @@
 // Kernel declarations
 extern "C" __global__ void sha1_collision_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
-extern "C" __global__ void sha1_collision_kernel_multistream(uint8_t *, uint64_t *, uint32_t *, uint64_t, uint32_t,
-                                                             uint32_t);
+//extern "C" __global__ void sha1_collision_kernel_multistream(uint8_t *, uint64_t *, uint32_t *, uint64_t, uint32_t,
+//                                                             uint32_t);
 
-extern "C" __global__ void sha1_collision_kernel_extreme(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+extern "C" __global__ void sha1_collision_kernel_extreme_asm(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
-extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+//extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
@@ -124,13 +124,13 @@ struct GPUContext {
 
         // Set cache configuration
         CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel, cudaFuncCachePreferL1));
-        CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_multistream, cudaFuncCachePreferL1));
+        //CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_multistream, cudaFuncCachePreferL1));
         if (use_extreme_kernel) {
-            CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_extreme, cudaFuncCachePreferL1));
+            CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_extreme_asm, cudaFuncCachePreferL1));
         }
-        if (use_ultra_kernel) {
-            CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_ultra, cudaFuncCachePreferL1));
-        }
+        //if (use_ultra_kernel) {
+        //    CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_ultra, cudaFuncCachePreferL1));
+        //}
 
         printInfo();
     }
@@ -344,7 +344,7 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
                 dim3 grid(gpu->optimal_blocks);
                 dim3 block(64);
 
-                sha1_collision_kernel_ultra<<<grid, block, 0, gpu->streams[s]>>>(
+                sha1_collision_kernel<<<grid, block, 0, gpu->streams[s]>>>(
                     nullptr,
                     gpu->d_pairs[s],
                     gpu->d_tickets[s],
@@ -355,7 +355,7 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
                 dim3 grid(gpu->optimal_blocks);
                 dim3 block(128);
 
-                sha1_collision_kernel_extreme<<<grid, block, 0, gpu->streams[s]>>>(
+                sha1_collision_kernel_extreme_asm<<<grid, block, 0, gpu->streams[s]>>>(
                     nullptr,
                     gpu->d_pairs[s],
                     gpu->d_tickets[s],
@@ -363,7 +363,7 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
                 );
             } else {
                 // Multi-stream kernel for standard GPUs
-                dim3 grid(gpu->optimal_blocks);
+                /*dim3 grid(gpu->optimal_blocks);
                 dim3 block(gpu->optimal_threads);
 
                 sha1_collision_kernel_multistream<<<grid, block, 0, gpu->streams[s]>>>(
@@ -373,7 +373,7 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
                     local_seed,
                     s,
                     gpu->streams.size()
-                );
+                );*/
             }
 
             local_seed += work_per_kernel;
