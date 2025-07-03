@@ -1,36 +1,40 @@
 #include "sha1_gpu.cuh"
-#include <cuda.h>
+#include "job_constants.cuh"
 #include <cuda_runtime.h>
+
+/* single device-side constants (populated by upload_new_job) */
+__device__ __constant__ uint8_t g_job_msg[32];
+__device__ __constant__ uint32_t g_target[5];
+
+/* 20-byte digest stored in shared memory */
+struct Digest {
+    uint32_t h[5];
+}; // 5×4 B = 20 B
 
 extern "C" __global__
 void sha1_double_kernel(uint8_t * __restrict__ out_msgs,
                         uint64_t * __restrict__ out_pairs,
                         uint32_t * __restrict__ ticket,
                         uint64_t seed) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    /* -------- generate 32-byte random message ------------------------- */
-    Xoroshiro128Plus prng{seed ^ tid, seed + tid * 0x9E3779B97F4A7C15ULL};
-    uint32_t M0 = prng.next();
-    uint32_t M1 = prng.next();
-    uint32_t M2 = prng.next();
-    uint32_t M3 = prng.next();
-
-    /* -------- first SHA-1 compression (single padded block) ----------- */
-    uint32_t w[16];
-    w[0] = bswap32(M0);
-    w[1] = bswap32(M1);
-    w[2] = bswap32(M2);
-    w[3] = bswap32(M3);
-    w[4] = 0x80000000U;
+    /* ── 1. load cached 32-B message, mix per-thread nonce ───────────── */
+    uint32_t M[8];
 #pragma unroll
-    for (int i = 5; i < 15; ++i) w[i] = 0;
-    w[15] = 0x00000100U; // length 256 bits
+    for (int i = 0; i < 8; ++i)
+        M[i] = reinterpret_cast<const uint32_t *>(g_job_msg)[i];
 
-    Sha1Ctx ctx{
-        0x67452301, 0xEFCDAB89, 0x98BADCFE,
-        0x10325476, 0xC3D2E1F0
-    };
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    M[7] ^= tid ^ static_cast<uint32_t>(seed);
+
+    /* ── 2. double-SHA-1 — identical to previous version ─────────────── */
+    uint32_t w[16];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) w[i] = bswap32(M[i]);
+    w[8] = 0x80000000U;
+#pragma unroll
+    for (int i = 9; i < 15; ++i) w[i] = 0;
+    w[15] = 0x00000100U;
+
+    Sha1Ctx ctx{0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
 
 #pragma unroll 80
     for (int i = 0; i < 80; ++i) {
@@ -52,20 +56,17 @@ void sha1_double_kernel(uint8_t * __restrict__ out_msgs,
         uint32_t wi = (i < 16)
                           ? w[i & 15]
                           : w[i & 15] = schedule_word(
-                                w[(i - 3) & 15],
-                                w[(i - 8) & 15],
-                                w[(i - 14) & 15],
-                                w[(i - 16) & 15]);
+                                w[(i - 3) & 15], w[(i - 8) & 15],
+                                w[(i - 14) & 15], w[(i - 16) & 15]);
         ctx.round(f, k, wi);
     }
+    uint32_t H0 = 0x67452301 + ctx.a,
+            H1 = 0xEFCDAB89 + ctx.b,
+            H2 = 0x98BADCFE + ctx.c,
+            H3 = 0x10325476 + ctx.d,
+            H4 = 0xC3D2E1F0 + ctx.e;
 
-    uint32_t H0 = 0x67452301 + ctx.a;
-    uint32_t H1 = 0xEFCDAB89 + ctx.b;
-    uint32_t H2 = 0x98BADCFE + ctx.c;
-    uint32_t H3 = 0x10325476 + ctx.d;
-    uint32_t H4 = 0xC3D2E1F0 + ctx.e;
-
-    /* -------- second compression on the 20-byte digest --------------- */
+    /* second compression on 20-B digest (unchanged) */
     w[0] = H0;
     w[1] = H1;
     w[2] = H2;
@@ -74,13 +75,9 @@ void sha1_double_kernel(uint8_t * __restrict__ out_msgs,
     w[5] = 0x80000000U;
 #pragma unroll
     for (int i = 6; i < 15; ++i) w[i] = 0;
-    w[15] = 0x000000A0U; // length 160 bits
+    w[15] = 0x000000A0U;
 
-    ctx = {
-        0x67452301, 0xEFCDAB89, 0x98BADCFE,
-        0x10325476, 0xC3D2E1F0
-    };
-
+    ctx = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
 #pragma unroll 80
     for (int i = 0; i < 80; ++i) {
         uint32_t f, k;
@@ -97,47 +94,59 @@ void sha1_double_kernel(uint8_t * __restrict__ out_msgs,
             f = ctx.b ^ ctx.c ^ ctx.d;
             k = 0xCA62C1D6;
         }
-
         uint32_t wi = (i < 16)
                           ? w[i & 15]
                           : w[i & 15] = schedule_word(
-                                w[(i - 3) & 15],
-                                w[(i - 8) & 15],
-                                w[(i - 14) & 15],
-                                w[(i - 16) & 15]);
+                                w[(i - 3) & 15], w[(i - 8) & 15],
+                                w[(i - 14) & 15], w[(i - 16) & 15]);
         ctx.round(f, k, wi);
     }
-
     H0 += ctx.a;
     H1 += ctx.b;
     H2 += ctx.c;
     H3 += ctx.d;
     H4 += ctx.e;
 
-    /* -------- 64-bit tag & collision filter --------------------------- */
-    uint64_t tag = (uint64_t(H0) << 32) | H1;
-    __shared__ uint64_t table[64];
-    int slot = tag & 63;
-    uint64_t old = atomicCAS(table + slot, 0ULL, tag);
+    /* ── 3. 160-bit collision filter in 64 buckets ──────────────────── */
+    __shared__ Digest buckets[64]; // 1 280 B
 
-    if (old == tag && old) {
-        uint32_t pos = atomicAdd(ticket, 1);
-        if (pos < (1u << 20)) {
-            uint64_t *dst = out_pairs + pos * 6;
-            dst[0] = M0;
-            dst[1] = M1;
-            dst[2] = M2;
-            dst[3] = M3;
-            dst[4] = old;
-            dst[5] = tag;
+    Digest mine = {H0, H1, H2, H3, H4};
+    const unsigned int slot = threadIdx.x & 63u;
+
+    /* first writer initialises slot */
+    uint32_t prev0 = atomicCAS(&buckets[slot].h[0], 0u, mine.h[0]);
+
+    bool real_hit = false;
+    if (prev0 == 0u) {
+#pragma unroll
+        for (int i = 1; i < 5; ++i)
+            buckets[slot].h[i] = mine.h[i];
+    } else {
+        real_hit = (prev0 == mine.h[0]) &&
+                   (buckets[slot].h[1] == mine.h[1]) &&
+                   (buckets[slot].h[2] == mine.h[2]) &&
+                   (buckets[slot].h[3] == mine.h[3]) &&
+                   (buckets[slot].h[4] == mine.h[4]);
+    }
+
+    /* ── 4. store candidate when real_hit == true ───────────────────── */
+    if (real_hit) {
+        uint32_t pos = ticket ? atomicAdd(ticket, 1) : 0;
+        if (out_pairs && pos < (1u << 20)) {
+            uint64_t *dst = out_pairs + pos * 4;
+            dst[0] = (static_cast<uint64_t>(M[1]) << 32) | M[0];
+            dst[1] = (static_cast<uint64_t>(M[3]) << 32) | M[2];
+            dst[2] = (static_cast<uint64_t>(M[5]) << 32) | M[4];
+            dst[3] = (static_cast<uint64_t>(M[7]) << 32) | M[6];
         }
     }
 
-#if 0   /* Optional: copy message back for inspection */
-    uint8_t* p = out_msgs + tid * 32;
-    reinterpret_cast<uint32_t*>(p)[0] = M0;
-    reinterpret_cast<uint32_t*>(p)[1] = M1;
-    reinterpret_cast<uint32_t*>(p)[2] = M2;
-    reinterpret_cast<uint32_t*>(p)[3] = M3;
+#if 0   // optional debug dump
+    if (out_msgs) {
+        uint8_t* p = out_msgs + tid * 32;
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+            reinterpret_cast<uint32_t*>(p)[i] = M[i];
+    }
 #endif
 }
