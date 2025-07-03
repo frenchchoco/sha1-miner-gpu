@@ -1,20 +1,53 @@
 cmake_minimum_required(VERSION 3.24)
 project(sha1_miner LANGUAGES CXX CUDA)
 
+# Language levels
 set(CMAKE_CXX_STANDARD   20)
 set(CMAKE_CUDA_STANDARD  20)
 
-# Uncomment if CMake fails to find CUDA 12.9
-# set(CUDAToolkit_ROOT "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9")
+# GPUs: Ampere 86, Ada 89, Hopper 90, Blackwell 120
+set(CMAKE_CUDA_ARCHITECTURES 86 89 90 120)
 
-set(CMAKE_CUDA_ARCHITECTURES 86 89 90)
-
-include_directories(include)
+find_package(CUDAToolkit REQUIRED)       # gives CUDA::cudart, include dirs
 
 add_library(kernel OBJECT src/kernel.cu)
-set_target_properties(kernel PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE  ON)
 
-add_executable(miner src/host.cpp $<TARGET_OBJECTS:kernel>)
-target_link_libraries(miner cuda cudart)
+target_include_directories(kernel PUBLIC
+        ${CMAKE_SOURCE_DIR}/include
+        ${CUDAToolkit_INCLUDE_DIRS})
+
+set_target_properties(kernel PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON        # compile with -rdc=true
+        POSITION_INDEPENDENT_CODE  ON)
+
+# host.cu uses <<< >>> so we compile it with nvcc as well
+add_executable(miner
+        src/host.cu
+        $<TARGET_OBJECTS:kernel>)
+
+set_target_properties(miner PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON)       # enables device-link step
+
+target_include_directories(miner PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CUDAToolkit_INCLUDE_DIRS})
+
+target_link_libraries(miner PRIVATE CUDA::cudart)
+
+add_executable(bench
+        src/bench.cu
+        $<TARGET_OBJECTS:kernel>)
+
+set_target_properties(bench PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON)
+
+target_include_directories(bench PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CUDAToolkit_INCLUDE_DIRS})
+
+target_link_libraries(bench PRIVATE CUDA::cudart)
+
+# ───────────────────────── Summary ─────────────────────────────────
+# - build miner      →  cmake --build . --target miner  -j
+# - build bench      →  cmake --build . --target bench  -j
+#   (bench prints hash-rate: ./bench   or  ./bench 200)
