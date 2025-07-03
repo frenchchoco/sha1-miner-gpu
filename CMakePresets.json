@@ -1,6 +1,5 @@
 {
   "version": 3,
-
   "configurePresets": [
     {
       "name": "windows-ninja-release",
@@ -9,13 +8,12 @@
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
         "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
     },
-
     {
       "name": "windows-ninja-debug",
       "displayName": "Debug (CUDA 12.9 + Ninja)",
@@ -23,6 +21,9 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS_DEBUG": "/Od /RTC1 /MDd",
+        "CMAKE_C_FLAGS_DEBUG": "/Od /RTC1 /MDd",
+        "CMAKE_CUDA_FLAGS_DEBUG": "--generate-line-info",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
@@ -30,7 +31,6 @@
       }
     }
   ],
-
   "buildPresets": [
     {
       "name": "release",
