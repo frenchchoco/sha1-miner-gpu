@@ -6,11 +6,11 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
-#include <signal.h>
-#include <unistd.h>
+#include <csignal>
 #include <fstream>
 #include <sstream>
 #include <ctime>
+#include <mutex>
 
 #include "job_upload_api.h"
 #include "cxxsha1.hpp"
@@ -41,6 +41,15 @@ std::atomic<uint32_t> g_total_candidates(0);
 void signal_handler(int sig) {
     std::cout << "\n\nReceived signal " << sig << ", shutting down gracefully...\n";
     g_shutdown.store(true);
+}
+
+// Set up signal handlers (cross-platform)
+void setup_signal_handlers() {
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    std::signal(SIGBREAK, signal_handler);
+#endif
 }
 
 // ==================== Job Configuration ====================
@@ -134,7 +143,7 @@ public:
         // Write header
         auto now = std::chrono::system_clock::now();
         auto time_t = std::chrono::system_clock::to_time_t(now);
-        output_file << "\n=== SHA-1 Collision Search Started at "
+        output_file << "\n=== SHA-1 Bitcoin Mining Started at "
                 << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
                 << " ===\n\n";
         output_file.flush();
@@ -186,7 +195,7 @@ public:
             sha1_update(ctx, d1, 20);
             sha1_final(ctx, d2);
 
-            output_file << "  SHA-1²: ";
+            output_file << "  SHA-1^2: ";
             for (int j = 0; j < 20; j++) {
                 output_file << std::hex << std::setw(2) << std::setfill('0')
                         << (int) d2[j];
@@ -197,7 +206,7 @@ public:
         output_file.flush();
 
         // Also print to console
-        std::cout << "\n🎯 Found " << count << " collision candidates! ";
+        std::cout << "\n[!] Found " << count << " collision candidates! ";
         std::cout << "Saved to output file.\n";
     }
 };
@@ -387,7 +396,7 @@ JobConfig parseConfig(int argc, char **argv) {
         } else if (arg == "--end-nonce" && i + 1 < argc) {
             config.end_nonce = std::stoull(argv[++i]);
         } else if (arg == "--help") {
-            std::cout << "SHA-1 Collision Finder\n\n";
+            std::cout << "SHA-1 Bitcoin Mining\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  --gpu <id>           GPU device ID (default: 0)\n";
@@ -418,10 +427,11 @@ JobConfig parseConfig(int argc, char **argv) {
 // ==================== Main ====================
 int main(int argc, char **argv) {
     // Set up signal handlers
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    setup_signal_handlers();
 
-    std::cout << "---- SHA-1 Bitcoin Mining ----\n";
+    std::cout << "\n+------------------------------------------+\n";
+    std::cout << "|        SHA-1 Bitcoin Mining v1.0         |\n";
+    std::cout << "+------------------------------------------+\n\n";
 
     // Parse configuration
     JobConfig config = parseConfig(argc, argv);
@@ -435,11 +445,11 @@ int main(int argc, char **argv) {
     }
 
     if (g_total_candidates.load() > 0) {
-        std::cout << "\n✅ Success! Found " << g_total_candidates.load()
-                  << " collisions.\n";
+        std::cout << "\n[SUCCESS] Found " << g_total_candidates.load()
+                << " collisions.\n";
         std::cout << "Results saved to: " << config.output_file << "\n";
     } else {
-        std::cout << "\n❌ No collisions found in search space.\n";
+        std::cout << "\n[FAILED] No collisions found in search space.\n";
     }
 
     return 0;
