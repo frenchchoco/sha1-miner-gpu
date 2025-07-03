@@ -57,7 +57,7 @@ target_link_libraries(bench PRIVATE jobupload kernel sha1lib CUDA::cudart)
 set_target_properties(bench PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # verify - verification tool
-add_executable(verify src/verify_sha1.cpp)
+add_executable(verify src/verify_sha1.cu)
 target_include_directories(verify PRIVATE ${CMAKE_SOURCE_DIR}/include ${CUDAToolkit_INCLUDE_DIRS})
 target_link_libraries(verify PRIVATE jobupload kernel sha1lib CUDA::cudart)
 set_target_properties(verify PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

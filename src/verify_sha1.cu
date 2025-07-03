@@ -8,7 +8,7 @@
 #include "job_upload_api.h"
 
 // Kernel declaration
-extern "C" __global__ void sha1_double_kernel_optimized(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+extern "C" __global__ void sha1_double_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
@@ -115,7 +115,7 @@ void test_gpu_kernel() {
 
     // Test 1: Should find the original message (nonce = 0)
     std::cout << "Test 1 - Finding original message:\n";
-    sha1_double_kernel_optimized<<<1, 1>>>(nullptr, d_pairs, d_ticket, 0);
+    sha1_double_kernel<<<1, 1>>>(nullptr, d_pairs, d_ticket, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     uint32_t found = 0;
@@ -151,7 +151,7 @@ void test_gpu_kernel() {
     CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
 
     // This will modify the last 4 bytes with different nonces
-    sha1_double_kernel_optimized<<<256, 256>>>(nullptr, d_pairs, d_ticket, 0xDEADBEEF);
+    sha1_double_kernel<<<256, 256>>>(nullptr, d_pairs, d_ticket, 0xDEADBEEF);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -209,7 +209,7 @@ void performance_check() {
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; i++) {
-        sha1_double_kernel_optimized<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
+        sha1_double_kernel<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
