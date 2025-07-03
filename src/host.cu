@@ -19,15 +19,8 @@
 #include "job_upload_api.h"
 #include "cxxsha1.hpp"
 
-// Kernel declarations
-extern "C" __global__ void sha1_collision_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
-
-//extern "C" __global__ void sha1_collision_kernel_multistream(uint8_t *, uint64_t *, uint32_t *, uint64_t, uint32_t,
-//                                                             uint32_t);
-
-extern "C" __global__ void sha1_collision_kernel_extreme_asm(uint8_t *, uint64_t *, uint32_t *, uint64_t);
-
-//extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+// Updated kernel declarations for the new optimized kernel
+extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
@@ -40,6 +33,7 @@ extern "C" __global__ void sha1_collision_kernel_extreme_asm(uint8_t *, uint64_t
 constexpr uint32_t RING_SIZE = 1u << 20; // 1M candidate slots
 constexpr int PROGRESS_INTERVAL = 5; // Update every 5 seconds
 constexpr int STREAMS_PER_GPU = 4; // Concurrent streams
+constexpr int NONCES_PER_THREAD = 16; // Must match kernel configuration
 
 // Global state for signal handling
 std::atomic<bool> g_shutdown(false);
@@ -72,7 +66,6 @@ struct GPUContext {
     int optimal_threads;
     uint64_t hashes_processed;
     bool use_extreme_kernel;
-    bool use_ultra_kernel;
 
     GPUContext(int id) : device_id(id), hashes_processed(0) {
         CUDA_CHECK(cudaSetDevice(device_id));
@@ -81,27 +74,24 @@ struct GPUContext {
         // Calculate optimal configuration based on GPU architecture
         if (properties.major >= 8) {
             // Ampere and newer (RTX 30xx, RTX 40xx, A100)
-            optimal_threads = 256;
+            optimal_threads = 512;
             optimal_blocks = properties.multiProcessorCount * 4;
             use_extreme_kernel = true;
-            use_ultra_kernel = (properties.multiProcessorCount >= 100); // RTX 4090, A100
         } else if (properties.major >= 7) {
             // Volta/Turing (V100, RTX 20xx)
             optimal_threads = 256;
-            optimal_blocks = properties.multiProcessorCount * 2;
+            optimal_blocks = properties.multiProcessorCount * 3;
             use_extreme_kernel = true;
-            use_ultra_kernel = false;
         } else if (properties.major >= 6) {
             // Pascal (GTX 10xx, P100)
             optimal_threads = 256;
             optimal_blocks = properties.multiProcessorCount * 2;
             use_extreme_kernel = false;
-            use_ultra_kernel = false;
         } else {
-            optimal_threads = 512;
-            optimal_blocks = properties.multiProcessorCount;
+            // Older GPUs
+            optimal_threads = 256;
+            optimal_blocks = properties.multiProcessorCount * 2;
             use_extreme_kernel = false;
-            use_ultra_kernel = false;
         }
 
         // Adjust blocks based on available memory
@@ -122,15 +112,8 @@ struct GPUContext {
             CUDA_CHECK(cudaMemset(d_tickets[i], 0, sizeof(uint32_t)));
         }
 
-        // Set cache configuration
-        CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel, cudaFuncCachePreferL1));
-        //CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_multistream, cudaFuncCachePreferL1));
-        if (use_extreme_kernel) {
-            CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_extreme_asm, cudaFuncCachePreferL1));
-        }
-        //if (use_ultra_kernel) {
-        //    CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_ultra, cudaFuncCachePreferL1));
-        //}
+        // Set cache configuration for the kernels
+        CUDA_CHECK(cudaFuncSetCacheConfig(sha1_collision_kernel_ultra, cudaFuncCachePreferL1));
 
         printInfo();
     }
@@ -155,11 +138,8 @@ struct GPUContext {
         std::cout << "L2 Cache      : " << properties.l2CacheSize / (1024 * 1024) << " MB\n";
         std::cout << "Configuration : " << optimal_blocks << " blocks × " << optimal_threads << " threads\n";
         std::cout << "Streams       : " << streams.size() << "\n";
-        std::cout << "Kernel Mode   : ";
-        if (use_ultra_kernel) std::cout << "Ultra (4-way ILP)";
-        else if (use_extreme_kernel) std::cout << "Extreme (2-way ILP)";
-        else std::cout << "Standard";
-        std::cout << "\n\n";
+        std::cout << "Kernel Mode   : " << (use_extreme_kernel ? "Extreme (128 threads)" : "Standard (256 threads)") <<
+                "\n\n";
     }
 };
 
@@ -322,15 +302,9 @@ private:
 void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
     CUDA_CHECK(cudaSetDevice(gpu->device_id));
 
-    // Calculate work based on kernel type
-    uint64_t work_per_kernel;
-    if (gpu->use_ultra_kernel) {
-        work_per_kernel = (uint64_t) gpu->optimal_blocks * 64 * 4; // 64 threads, 4 nonces each
-    } else if (gpu->use_extreme_kernel) {
-        work_per_kernel = (uint64_t) gpu->optimal_blocks * 128 * 2; // 128 threads, 2 nonces each
-    } else {
-        work_per_kernel = (uint64_t) gpu->optimal_blocks * gpu->optimal_threads * 8; // 8 nonces per thread
-    }
+    // Calculate work based on kernel type and configuration
+    // The new kernel processes 16 nonces per thread (NONCES_PER_THREAD)
+    uint64_t work_per_kernel = (uint64_t) gpu->optimal_blocks * gpu->optimal_threads * NONCES_PER_THREAD;
 
     uint64_t local_seed = base_seed + gpu->device_id * (1ull << 48);
 
@@ -339,42 +313,16 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
     while (!g_shutdown.load()) {
         // Launch kernels on all streams
         for (size_t s = 0; s < gpu->streams.size(); s++) {
-            if (gpu->use_ultra_kernel) {
-                // Ultra kernel for highest-end GPUs
-                dim3 grid(gpu->optimal_blocks);
-                dim3 block(64);
+            // Use extreme kernel with 128 threads for high-end GPUs
+            dim3 grid(gpu->optimal_blocks);
+            dim3 block(256);
 
-                sha1_collision_kernel<<<grid, block, 0, gpu->streams[s]>>>(
-                    nullptr,
-                    gpu->d_pairs[s],
-                    gpu->d_tickets[s],
-                    local_seed
-                );
-            } else if (gpu->use_extreme_kernel) {
-                // Extreme kernel for high-end GPUs
-                dim3 grid(gpu->optimal_blocks);
-                dim3 block(128);
-
-                sha1_collision_kernel_extreme_asm<<<grid, block, 0, gpu->streams[s]>>>(
-                    nullptr,
-                    gpu->d_pairs[s],
-                    gpu->d_tickets[s],
-                    local_seed
-                );
-            } else {
-                // Multi-stream kernel for standard GPUs
-                /*dim3 grid(gpu->optimal_blocks);
-                dim3 block(gpu->optimal_threads);
-
-                sha1_collision_kernel_multistream<<<grid, block, 0, gpu->streams[s]>>>(
-                    nullptr,
-                    gpu->d_pairs[s],
-                    gpu->d_tickets[s],
-                    local_seed,
-                    s,
-                    gpu->streams.size()
-                );*/
-            }
+            sha1_collision_kernel_ultra<<<grid, block, 0, gpu->streams[s]>>>(
+                nullptr,
+                gpu->d_pairs[s],
+                gpu->d_tickets[s],
+                local_seed
+            );
 
             local_seed += work_per_kernel;
         }
@@ -445,7 +393,7 @@ Config parse_arguments(int argc, char **argv) {
                 config.benchmark_seconds = std::stoi(argv[++i]);
             }
         } else if (arg == "--help") {
-            std::cout << "SHA-1 Collision Miner v2.0 (Ultra)\n\n";
+            std::cout << "SHA-1 Collision Miner v2.0 (Optimized)\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  --gpu <id>       GPU device ID (can be used multiple times)\n";
@@ -481,7 +429,7 @@ int main(int argc, char **argv) {
     setup_signal_handlers();
 
     std::cout << "\n+------------------------------------------+\n";
-    std::cout << "|    SHA-1 Collision Miner v2.0 (Ultra)    |\n";
+    std::cout << "|  SHA-1 Collision Miner v2.0 (Optimized) |\n";
     std::cout << "+------------------------------------------+\n\n";
 
     // Parse configuration
