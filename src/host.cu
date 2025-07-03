@@ -16,7 +16,7 @@
 #include "cxxsha1.cpp"
 
 // Kernel declaration
-extern "C" __global__ void sha1_double_kernel_optimized(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+extern "C" __global__ void sha1_double_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
@@ -93,7 +93,7 @@ public:
         CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
 
         // Set cache config
-        CUDA_CHECK(cudaFuncSetCacheConfig(sha1_double_kernel_optimized, cudaFuncCachePreferL1));
+        CUDA_CHECK(cudaFuncSetCacheConfig(sha1_double_kernel, cudaFuncCachePreferL1));
 
         printInfo();
     }
@@ -321,7 +321,7 @@ void runCollisionFinder(const JobConfig &config) {
         dim3 grid = gpu.getGridDim(work_size);
         dim3 block = gpu.getBlockDim();
 
-        sha1_double_kernel_optimized<<<grid, block>>>(
+        sha1_double_kernel<<<grid, block>>>(
             nullptr, gpu.getPairsPtr(), gpu.getTicketPtr(), current_nonce
         );
         CUDA_CHECK(cudaPeekAtLastError());
