@@ -8,7 +8,7 @@
 #include "job_upload_api.h"
 
 // Kernel declaration for single SHA-1
-extern "C" __global__ void sha1_collision_kernel_extreme_asm(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
@@ -112,7 +112,7 @@ void test_gpu_kernel() {
     std::cout << "Test 1 - Finding original message:\n";
 
     // Launch kernel with 1 thread
-    sha1_collision_kernel_extreme_asm<<<1, 1>>>(nullptr, d_pairs, d_ticket, 0);
+    sha1_collision_kernel_ultra<<<1, 1>>>(nullptr, d_pairs, d_ticket, 0);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -157,7 +157,7 @@ void test_gpu_kernel() {
     CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
 
     // Launch with more threads
-    sha1_collision_kernel_extreme_asm<<<256, 256>>>(nullptr, d_pairs, d_ticket, 0xDEADBEEF);
+    sha1_collision_kernel_ultra<<<256, 256>>>(nullptr, d_pairs, d_ticket, 0xDEADBEEF);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -216,11 +216,11 @@ void performance_check() {
 
     const int blocks = 256;
     const int threads = 256;
-    const int iterations = 100;
+    const int iterations = 100000;
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; i++) {
-        sha1_collision_kernel_extreme_asm<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
+        sha1_collision_kernel_ultra<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -280,7 +280,7 @@ void test_collision_finding() {
     CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
     // Search with many threads
     std::cout << "Searching with 1M threads...\n";
-    sha1_collision_kernel_extreme_asm<<<4096, 256>>>(nullptr, d_pairs, d_ticket, 0x12345678);
+    sha1_collision_kernel_ultra<<<4096, 256>>>(nullptr, d_pairs, d_ticket, 0x12345678);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     uint32_t found = 0;
