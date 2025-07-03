@@ -25,13 +25,12 @@ __device__ __host__ static inline uint32_t rotl32(uint32_t x, int n) {
     return (x << n) | (x >> (32 - n));
 }
 
-static __device__ void sha1_compress(const uint8_t* msg, uint32_t H[5])
-{
+static __device__ void sha1_compress(const uint8_t *msg, uint32_t H[5]) {
     uint32_t w[80];
 
 #pragma unroll
     for (int i = 0; i < 16; ++i)
-        w[i] = bswap32(*(const uint32_t*)(msg + 4 * i));
+        w[i] = bswap32(*(const uint32_t *) (msg + 4 * i));
 
 #pragma unroll
     for (int i = 16; i < 80; ++i)
@@ -42,14 +41,31 @@ static __device__ void sha1_compress(const uint8_t* msg, uint32_t H[5])
 #pragma unroll
     for (int i = 0; i < 80; ++i) {
         uint32_t f, k;
-        if (i < 20)        { f = (b & c) | (~b & d);      k = 0x5A827999; }
-        else if (i < 40)   { f = b ^ c ^ d;               k = 0x6ED9EBA1; }
-        else if (i < 60)   { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
-        else               { f = b ^ c ^ d;               k = 0xCA62C1D6; }
+        if (i < 20) {
+            f = (b & c) | (~b & d);
+            k = 0x5A827999;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
 
         uint32_t tmp = rotl32(a, 5) + f + e + k + w[i];
-        e = d; d = c; c = rotl32(b, 30); b = a; a = tmp;
+        e = d;
+        d = c;
+        c = rotl32(b, 30);
+        b = a;
+        a = tmp;
     }
 
-    H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e;
+    H[0] += a;
+    H[1] += b;
+    H[2] += c;
+    H[3] += d;
+    H[4] += e;
 }

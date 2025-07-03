@@ -1,32 +1,36 @@
 cmake_minimum_required(VERSION 3.24)
 project(sha1_miner LANGUAGES CXX CUDA)
 
-# Language levels
-set(CMAKE_CXX_STANDARD   20)
-set(CMAKE_CUDA_STANDARD  20)
+# Language levels & architectures
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_ARCHITECTURES 86 89 90 120)     # Ampere / Ada / Hopper / Blackwell
 
-# GPUs: Ampere 86, Ada 89, Hopper 90, Blackwell 120
-set(CMAKE_CUDA_ARCHITECTURES 86 89 90 120)
-
-find_package(CUDAToolkit REQUIRED)       # gives CUDA::cudart, include dirs
+find_package(CUDAToolkit REQUIRED)
 
 add_library(kernel OBJECT src/kernel.cu)
+
+target_compile_options(kernel PRIVATE
+        --use_fast_math
+        -Xptxas -O3
+        -Xptxas -maxrregcount=64)
 
 target_include_directories(kernel PUBLIC
         ${CMAKE_SOURCE_DIR}/include
         ${CUDAToolkit_INCLUDE_DIRS})
 
 set_target_properties(kernel PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON        # compile with -rdc=true
-        POSITION_INDEPENDENT_CODE  ON)
+        CUDA_SEPARABLE_COMPILATION ON     # compile with -rdc=true
+        POSITION_INDEPENDENT_CODE ON)
 
-# host.cu uses <<< >>> so we compile it with nvcc as well
+# miner executable   (host.cu + kernel object)
 add_executable(miner
         src/host.cu
         $<TARGET_OBJECTS:kernel>)
+# set_source_files_properties(src/host.cpp PROPERTIES LANGUAGE CUDA)
 
 set_target_properties(miner PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON)       # enables device-link step
+        CUDA_SEPARABLE_COMPILATION ON)    # enables device-link step
 
 target_include_directories(miner PRIVATE
         ${CMAKE_SOURCE_DIR}/include
@@ -34,6 +38,7 @@ target_include_directories(miner PRIVATE
 
 target_link_libraries(miner PRIVATE CUDA::cudart)
 
+# bench executable (bench.cu + kernel object)
 add_executable(bench
         src/bench.cu
         $<TARGET_OBJECTS:kernel>)
@@ -46,8 +51,3 @@ target_include_directories(bench PRIVATE
         ${CUDAToolkit_INCLUDE_DIRS})
 
 target_link_libraries(bench PRIVATE CUDA::cudart)
-
-# ───────────────────────── Summary ─────────────────────────────────
-# - build miner      →  cmake --build . --target miner  -j
-# - build bench      →  cmake --build . --target bench  -j
-#   (bench prints hash-rate: ./bench   or  ./bench 200)

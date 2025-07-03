@@ -1,11 +1,8 @@
 #pragma once
 #include <span>
 #include <cstdint>
-#include <cstring>
 #include <random>
 
-/* -------- portable 8-byte fingerprint of a digest ------------------ */
-/*  Works with BOTH fixed-extent and dynamic-extent spans.             */
 template<std::size_t N = std::dynamic_extent>
 inline uint64_t digest_tag(std::span<const uint8_t, N> d) {
     static_assert(N == std::dynamic_extent || N >= 8,
@@ -15,7 +12,6 @@ inline uint64_t digest_tag(std::span<const uint8_t, N> d) {
     return tag;
 }
 
-/* -------- fill a span with random bytes ---------------------------- */
 inline void fill_rand(std::span<uint8_t> buf) {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<uint32_t> dist;
