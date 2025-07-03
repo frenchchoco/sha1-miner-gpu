@@ -7,12 +7,12 @@
 #include "cxxsha1.hpp"
 #include "job_upload_api.h"
 
-// Kernel declaration for single SHA-1
-extern "C" __global__ void sha1_collision_kernel_ultra(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+// Kernel declaration for bitsliced SHA-1
+extern "C" __global__ void sha1_warp_collaborative_kernel(uint64_t *, uint32_t *, uint64_t);
 
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
-        std::cerr << "CUDA Error: " << cudaGetErrorString(_e) << '\n'; \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << '\n'; \
         std::exit(1);} \
     }while(0)
 
@@ -76,7 +76,7 @@ void test_known_vectors() {
 
 // Test GPU kernel with specific inputs
 void test_gpu_kernel() {
-    std::cout << "=== Testing GPU Kernel ===\n\n";
+    std::cout << "=== Testing Bitsliced GPU Kernel ===\n\n";
 
     // Setup test message
     uint8_t test_msg[32];
@@ -110,9 +110,10 @@ void test_gpu_kernel() {
 
     // Test 1: Should find the original message (nonce = 0)
     std::cout << "Test 1 - Finding original message:\n";
+    std::cout << "Note: Bitsliced kernel processes 32 messages per warp\n";
 
-    // Launch kernel with 1 thread
-    sha1_collision_kernel_ultra<<<1, 1>>>(nullptr, d_pairs, d_ticket, 0);
+    // Launch kernel with 32 threads (1 warp) to process first 32 nonces
+    sha1_warp_collaborative_kernel<<<1, 32>>>(d_pairs, d_ticket, 0);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -156,13 +157,16 @@ void test_gpu_kernel() {
     std::cout << "\nTest 2 - Searching range with modifications:\n";
     CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
 
-    // Launch with more threads
-    sha1_collision_kernel_ultra<<<256, 256>>>(nullptr, d_pairs, d_ticket, 0xDEADBEEF);
+    // Launch with multiple warps (must be multiple of 32 threads)
+    // Bitsliced kernel uses __launch_bounds__(128, 4)
+    sha1_warp_collaborative_kernel<<<64, 128>>>(d_pairs, d_ticket, 0xDEADBEEF);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    std::cout << "Found candidates in 65536 attempts: " << found << "\n";
+    // Each warp processes 32*4 = 128 messages (4 batches of 32)
+    uint64_t total_processed = 64 * 4 * 128; // blocks * warps_per_block * messages_per_warp
+    std::cout << "Found candidates in " << total_processed << " attempts: " << found << "\n";
 
     // Cleanup
     CUDA_CHECK(cudaFree(d_pairs));
@@ -196,7 +200,7 @@ void verify_collision(const uint8_t *msg1, const uint8_t *msg2) {
 
 // Performance sanity check
 void performance_check() {
-    std::cout << "\n=== Performance Sanity Check ===\n";
+    std::cout << "\n=== Bitsliced Performance Sanity Check ===\n";
 
     // Dummy job
     uint8_t msg[32] = {0};
@@ -214,16 +218,17 @@ void performance_check() {
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    const int blocks = 16384;
-    const int threads = 256; // must not exceed __launch_bounds__(256,2)
-    const int iterations = 1; // long enough to get >100 ms
-
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    // For bitsliced kernel: threads must be multiple of 32
+    // and not exceed __launch_bounds__(128, 4)
+    const int blocks = 512;
+    const int threads = 256; // 4 warps per block
+    const int iterations = 100000;
+    const int batches_per_warp = 4; // From kernel implementation
+    const int messages_per_batch = 32;
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; ++i) {
-        sha1_collision_kernel_ultra<<<blocks, threads>>>(nullptr, d_pairs, d_ticket, i);
+        sha1_warp_collaborative_kernel<<<blocks, threads>>>(d_pairs, d_ticket, i * blocks * threads);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -231,22 +236,28 @@ void performance_check() {
     float ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
 
-    uint64_t total_hashes =
-            (uint64_t) blocks * threads * iterations * 16;
+    // Calculate total hashes: blocks * warps_per_block * batches_per_warp * messages_per_batch * iterations
+    uint64_t warps_per_block = threads / 32;
+    uint64_t total_hashes = (uint64_t) blocks * warps_per_block * batches_per_warp * messages_per_batch * iterations;
 
     double ghps = total_hashes / (ms * 1e6); // ms→s and hashes→giga
 
-    std::cout << "Hashes computed : " << total_hashes << '\n'
-            << "Time            : " << ms << " ms\n"
-            << "Performance     : " << std::fixed << std::setprecision(1)
+    std::cout << "Bitsliced implementation stats:\n";
+    std::cout << "Blocks          : " << blocks << '\n';
+    std::cout << "Threads/block   : " << threads << " (" << warps_per_block << " warps)\n";
+    std::cout << "Messages/warp   : " << batches_per_warp * messages_per_batch << '\n';
+    std::cout << "Iterations      : " << iterations << '\n';
+    std::cout << "Total hashes    : " << total_hashes << '\n';
+    std::cout << "Time            : " << ms << " ms\n";
+    std::cout << "Performance     : " << std::fixed << std::setprecision(3)
             << ghps << " GH/s\n";
 
-    if (ghps < 0.1) {
-        std::cout << "WARNING: Performance seems too low!\n";
-    } else if (ghps > 1000) {
-        std::cout << "WARNING: Performance seems unrealistically high!\n";
+    if (ghps < 0.001) {
+        std::cout << "WARNING: Performance seems too low! (Expected 0.1-2 GH/s for bitsliced)\n";
+    } else if (ghps > 10) {
+        std::cout << "WARNING: Performance seems unrealistically high for bitsliced!\n";
     } else {
-        std::cout << "Performance looks reasonable.\n";
+        std::cout << "Performance looks reasonable for bitsliced implementation.\n";
     }
 
     // Cleanup
@@ -258,19 +269,23 @@ void performance_check() {
 
 // Test collision finding capability
 void test_collision_finding() {
-    std::cout << "\n=== Testing Collision Finding ===\n";
-    // Create a target that's more likely to have collisions (e.g., with some zero bytes)
+    std::cout << "\n=== Testing Bitsliced Collision Finding ===\n";
+
+    // Create a target that's more likely to have collisions
     uint8_t base_msg[32] = {0};
-    base_msg[0] = 0x01; // Small change from all zeros
+    base_msg[0] = 0x01;
     uint8_t target_hash[20];
     cpu_sha1(base_msg, target_hash);
+
     // Set some bytes to zero to increase collision probability
     target_hash[18] = 0x00;
     target_hash[19] = 0x00;
+
     std::cout << "Searching for partial collisions with target ending in 0000\n";
     std::cout << "Target hash: ";
     for (int i = 0; i < 20; i++) printf("%02x", target_hash[i]);
     std::cout << "\n";
+
     uint32_t target[5];
     for (int i = 0; i < 5; i++) {
         target[i] = (uint32_t(target_hash[4 * i]) << 24) |
@@ -278,20 +293,135 @@ void test_collision_finding() {
                     (uint32_t(target_hash[4 * i + 2]) << 8) |
                     uint32_t(target_hash[4 * i + 3]);
     }
+
     upload_new_job(base_msg, target);
+
     uint64_t *d_pairs;
     uint32_t *d_ticket;
     CUDA_CHECK(cudaMalloc(&d_pairs, sizeof(uint64_t) * 4 * 1024));
     CUDA_CHECK(cudaMalloc(&d_ticket, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
-    // Search with many threads
-    std::cout << "Searching with 1M threads...\n";
-    sha1_collision_kernel_ultra<<<4096, 256>>>(nullptr, d_pairs, d_ticket, 0x12345678);
+
+    // Search with many warps
+    const int blocks = 512;
+    const int threads = 128; // 4 warps per block
+    uint64_t total_messages = (uint64_t) blocks * (threads / 32) * 4 * 32; // 4 batches of 32 messages per warp
+
+    std::cout << "Searching " << total_messages << " messages with bitsliced kernel...\n";
+    sha1_warp_collaborative_kernel<<<blocks, threads>>>(d_pairs, d_ticket, 0x12345678);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     uint32_t found = 0;
     CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(uint32_t), cudaMemcpyDeviceToHost));
     std::cout << "Found " << found << " candidates\n";
+
+    if (found > 0 && found <= 10) {
+        // Print first few results
+        std::vector<uint64_t> results(found * 4);
+        CUDA_CHECK(cudaMemcpy(results.data(), d_pairs, sizeof(uint64_t) * 4 * found, cudaMemcpyDeviceToHost));
+
+        for (uint32_t i = 0; i < found && i < 3; i++) {
+            std::cout << "\nCandidate " << i + 1 << ":\n";
+            uint8_t msg[32];
+            for (int j = 0; j < 4; j++) {
+                for (int k = 0; k < 8; k++) {
+                    msg[j * 8 + k] = (results[i * 4 + j] >> (k * 8)) & 0xFF;
+                }
+            }
+
+            std::cout << "Message: ";
+            for (int j = 0; j < 32; j++) printf("%02x", msg[j]);
+
+            uint8_t hash[20];
+            cpu_sha1(msg, hash);
+            std::cout << "\nHash:    ";
+            for (int j = 0; j < 20; j++) printf("%02x", hash[j]);
+            std::cout << "\n";
+        }
+    }
+
+    CUDA_CHECK(cudaFree(d_pairs));
+    CUDA_CHECK(cudaFree(d_ticket));
+}
+
+// Test bitslicing correctness
+void test_bitslicing_correctness() {
+    std::cout << "\n=== Testing Bitslicing Correctness ===\n";
+
+    // Test with a specific nonce range where we know the answer
+    uint8_t msg[32] = {0};
+    msg[0] = 0xAB;
+    msg[1] = 0xCD;
+
+    // Compute hash for various nonces on CPU
+    std::cout << "CPU reference hashes for first 5 nonces:\n";
+    for (uint64_t nonce = 0; nonce < 5; nonce++) {
+        uint8_t test_msg[32];
+        memcpy(test_msg, msg, 32);
+
+        // Apply nonce
+        uint32_t *msg_words = (uint32_t *) test_msg;
+        msg_words[6] ^= (uint32_t) (nonce & 0xFFFFFFFF);
+        msg_words[7] ^= (uint32_t) (nonce >> 32);
+
+        uint8_t hash[20];
+        cpu_sha1(test_msg, hash);
+
+        std::cout << "Nonce " << nonce << ": ";
+        for (int i = 0; i < 20; i++) printf("%02x", hash[i]);
+        std::cout << "\n";
+    }
+
+    // Set target to match nonce=2
+    uint8_t target_msg[32];
+    memcpy(target_msg, msg, 32);
+    uint32_t *target_words = (uint32_t *) target_msg;
+    target_words[6] ^= 2; // nonce = 2
+
+    uint8_t target_hash[20];
+    cpu_sha1(target_msg, target_hash);
+
+    uint32_t target[5];
+    for (int i = 0; i < 5; i++) {
+        target[i] = (uint32_t(target_hash[4 * i]) << 24) |
+                    (uint32_t(target_hash[4 * i + 1]) << 16) |
+                    (uint32_t(target_hash[4 * i + 2]) << 8) |
+                    uint32_t(target_hash[4 * i + 3]);
+    }
+
+    upload_new_job(msg, target);
+
+    uint64_t *d_pairs;
+    uint32_t *d_ticket;
+    CUDA_CHECK(cudaMalloc(&d_pairs, sizeof(uint64_t) * 4 * 10));
+    CUDA_CHECK(cudaMalloc(&d_ticket, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
+
+    // Launch just one warp to test first 32 nonces
+    std::cout << "\nLaunching bitsliced kernel for nonces 0-31...\n";
+    sha1_warp_collaborative_kernel<<<1, 32>>>(d_pairs, d_ticket, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    uint32_t found = 0;
+    CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+    if (found == 1) {
+        std::cout << "SUCCESS: Found exactly 1 match (expected nonce=2)\n";
+
+        uint64_t result[4];
+        CUDA_CHECK(cudaMemcpy(result, d_pairs, sizeof(uint64_t) * 4, cudaMemcpyDeviceToHost));
+
+        // Verify it's nonce=2
+        uint32_t found_m6 = result[3] & 0xFFFFFFFF;
+        uint32_t found_m7 = result[3] >> 32;
+        uint32_t orig_m6 = ((uint32_t *) msg)[6];
+        uint32_t orig_m7 = ((uint32_t *) msg)[7];
+
+        uint64_t found_nonce = ((uint64_t) (found_m7 ^ orig_m7) << 32) | (found_m6 ^ orig_m6);
+        std::cout << "Found nonce: " << found_nonce << " (expected: 2)\n";
+    } else {
+        std::cout << "ERROR: Found " << found << " matches (expected exactly 1)\n";
+    }
 
     CUDA_CHECK(cudaFree(d_pairs));
     CUDA_CHECK(cudaFree(d_ticket));
@@ -299,12 +429,26 @@ void test_collision_finding() {
 
 int main(int argc, char **argv) {
     std::cout << "+------------------------------------------+\n";
-    std::cout << "|    SHA-1 Collision Mining Verification   |\n";
+    std::cout << "|  SHA-1 Bitsliced Mining Verification     |\n";
     std::cout << "+------------------------------------------+\n\n";
+
+    // Check CUDA device
+    int deviceCount;
+    CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+    if (deviceCount == 0) {
+        std::cerr << "No CUDA devices found!\n";
+        return 1;
+    }
+
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    std::cout << "Using GPU: " << prop.name << " (SM " << prop.major << "." << prop.minor << ")\n";
+    std::cout << "Warp size: " << prop.warpSize << "\n\n";
 
     // Run all tests
     test_known_vectors();
     test_gpu_kernel();
+    test_bitslicing_correctness();
     performance_check();
     test_collision_finding();
 
