@@ -1,11 +1,9 @@
 #include <cuda_runtime.h>
 #include <iostream>
-#include <cstdint>
 #include <array>
 #include <chrono>
 #include "job_upload_api.h"
-#include "cxxsha1.hpp"
-#include "job_constants.cuh"
+#include "cxxsha1.cpp"
 
 // Forward declaration of optimized kernel
 extern "C" __global__
@@ -20,9 +18,6 @@ void sha1_double_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
          }                                                                \
     } while (0)
 
-/* --------------------------------------------------------------------- */
-constexpr uint32_t BATCH = 1u << 24; // 16M threads (increased for better GPU utilization)
-constexpr int THREADS = 256; // Optimal for modern GPUs
 constexpr uint32_t RING_SIZE = 1u << 20; // Ring buffer slots
 constexpr int WARMUP_RUNS = 10; // Warmup iterations
 
