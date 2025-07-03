@@ -5,6 +5,7 @@
 #include "job_upload_api.h"
 
 #include "cxxsha1.hpp"
+#include "job_constants.cuh"
 
 extern "C" __global__
 void sha1_double_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
@@ -57,7 +58,20 @@ int main(int argc, char **argv) {
                 static_cast<uint32_t>(d2[4 * i + 3]);
     }
 
+    std::cout << "CPU double-SHA-1(preimage): ";
+    for (uint8_t b: d2) std::printf("%02x", b);
+    std::cout << '\n';
+
+    /* upload target as before */
     upload_new_job(preimage.data(), target);
+
+    /* optional sanity-check: read g_target back */
+    uint32_t target_d[5] = {};
+    CUDA_CHECK(cudaMemcpyFromSymbol(target_d, g_target, 5*4));
+    std::cout << "g_target (device)        : ";
+    for (int i = 0; i < 5; ++i)
+        std::printf("%08x", target_d[i]);
+    std::cout << '\n';
 
     /* ------------------------------------------------------------------ */
     /* 2.  Allocate ring buffer + ticket                                  */
@@ -110,6 +124,38 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(found),
         cudaMemcpyDeviceToHost));
     std::cout << "Candidates stored: " << found << '\n';
+
+    if (found) {
+        uint64_t first[4] = {};
+        CUDA_CHECK(cudaMemcpy(first, d_pairs, sizeof(first),
+            cudaMemcpyDeviceToHost));
+        uint32_t msg32[8];
+        msg32[0] = uint32_t(first[0]);
+        msg32[1] = uint32_t(first[0] >> 32);
+        msg32[2] = uint32_t(first[1]);
+        msg32[3] = uint32_t(first[1] >> 32);
+        msg32[4] = uint32_t(first[2]);
+        msg32[5] = uint32_t(first[2] >> 32);
+        msg32[6] = uint32_t(first[3]);
+        msg32[7] = uint32_t(first[3] >> 32);
+        std::cout << "\nFirst candidate message : ";
+        for (int i = 0; i < 8; ++i) std::printf("%08x", msg32[i]);
+        std::cout << '\n';
+
+        /* compute double-SHA-1 on CPU just to show the digest          */
+        uint8_t dA[20], dB[20];
+        sha1_ctx tmp{};
+        sha1_init(tmp);
+        sha1_update(tmp, msg32, 32);
+        sha1_final(tmp, dA);
+        sha1_init(tmp);
+        sha1_update(tmp, dA, 20);
+        sha1_final(tmp, dB);
+
+        std::cout << "double-SHA-1(candidate) : ";
+        for (uint8_t b: dB) std::printf("%02x", b);
+        std::cout << "\n------------------------------------------------\n";
+    }
 
     /* ------------------------------------------------------------------ */
     /* 5.  Cleanup                                                        */
