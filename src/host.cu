@@ -1,77 +1,65 @@
-#include <span>
 #include <cuda_runtime.h>
-#include "util.hpp"
-
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <unordered_map>
 #include <iostream>
+#include <vector>
+#include <cstdint>
+#include <cstdlib>          // for std::exit
 
-#define CHECK(x)                                                                       \
-    do {                                                                               \
-        auto err = (x);                                                                \
-        if (err != cudaSuccess) {                                                      \
-            std::cerr << "CUDA error: " << cudaGetErrorString(err) << '\n';            \
-            std::exit(1);                                                              \
-        }                                                                              \
+/* -- add __global__ here -------------------------------------- */
+extern "C" __global__
+void sha1_double_kernel(uint8_t *, uint64_t *, uint32_t *, uint64_t);
+
+#define CUDA_CHECK(x)                                                        \
+    do {                                                                     \
+        cudaError_t e = (x);                                                 \
+        if (e != cudaSuccess) {                                              \
+            std::cerr << cudaGetErrorString(e) << '\n';                      \
+            std::exit(1);                                                    \
+        }                                                                    \
     } while (0)
 
-constexpr uint32_t  BATCH      = 1 << 22;
-constexpr size_t    MSG_BYTES  = 32;
-constexpr size_t    OUT_BYTES  = 20;
+int main(int argc, char **argv) {
+    constexpr uint64_t TOTAL = 1ull << 30; // messages per batch
+    constexpr int THREADS = 1024;
+    const int blocks = int((TOTAL + THREADS - 1) / THREADS);
 
-extern __global__ void sha1_double_kernel(const uint8_t*, uint8_t*, uint32_t);
+    /* device buffers ------------------------------------------------------ */
+    uint64_t *d_pairs = nullptr;
+    uint32_t *d_ticket = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_pairs, sizeof(uint64_t) * 6 * (1 << 20)));
+    CUDA_CHECK(cudaMalloc(&d_ticket, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(d_ticket, 0, sizeof(uint32_t)));
 
-int main()
-{
-    std::vector<uint8_t> h_msg(BATCH * MSG_BYTES);
-    std::vector<uint8_t> h_out(BATCH * OUT_BYTES);
+    /* timing -------------------------------------------------------------- */
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
 
-    uint8_t *d_msg{}, *d_out{};
-    CHECK(cudaMalloc(&d_msg, h_msg.size()));
-    CHECK(cudaMalloc(&d_out, h_out.size()));
+    /* kernel launch ------------------------------------------------------- */
+    sha1_double_kernel<<<blocks, THREADS>>>(
+        /* out_msgs = */ nullptr,
+                         /* out_pairs */ d_pairs,
+                         /* ticket    */ d_ticket,
+                         /* seed      */ 0xDEADBEEFCAFEBABEULL);
 
-    while (true) {
-        fill_rand(std::span<uint8_t>(h_msg));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-        CHECK(cudaMemcpy(d_msg, h_msg.data(), h_msg.size(),
-                         cudaMemcpyHostToDevice));
+    /* end timing ---------------------------------------------------------- */
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float ms = 0.f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
 
-        constexpr int THREADS = 256;
-        dim3 blockDim(THREADS);
-        dim3 gridDim((BATCH + THREADS - 1) / THREADS);
+    double hashes = static_cast<double>(TOTAL);
+    std::cout << "Throughput: " << hashes / ms * 1e3 / 1e9
+            << "  G double-SHA-1/s\n";
 
-        sha1_double_kernel<<<gridDim, blockDim>>>(d_msg, d_out, BATCH);
-        CHECK(cudaDeviceSynchronize());
+    uint32_t found = 0;
+    CUDA_CHECK(cudaMemcpy(&found, d_ticket, sizeof(found),
+        cudaMemcpyDeviceToHost));
+    std::cout << "Candidates stored: " << found << '\n';
 
-        CHECK(cudaMemcpy(h_out.data(), d_out, h_out.size(),
-                         cudaMemcpyDeviceToHost));
-
-        std::unordered_map<uint64_t, uint32_t> seen;
-        for (uint32_t i = 0; i < BATCH; ++i) {
-            std::span<const uint8_t> digest(&h_out[i * OUT_BYTES], OUT_BYTES);
-
-            uint64_t tag = digest_tag(digest);
-            auto [it, inserted] = seen.emplace(tag, i);
-
-            if (!inserted &&
-                std::memcmp(digest.data(),
-                            &h_out[it->second * OUT_BYTES], OUT_BYTES) == 0 &&
-                std::memcmp(&h_msg[i * MSG_BYTES],
-                            &h_msg[it->second * MSG_BYTES], MSG_BYTES) != 0)
-            {
-                std::cout << "***** SHA-1 double collision found! *****\n";
-
-                auto dump = [&](const uint8_t* p) {
-                    for (size_t j = 0; j < MSG_BYTES; ++j)
-                        printf("%02x", p[j]);
-                    std::cout << '\n';
-                };
-                dump(&h_msg[i * MSG_BYTES]);
-                dump(&h_msg[it->second * MSG_BYTES]);
-                return 0;
-            }
-        }
-        std::cout << "batch done, no collision yet\n";
-    }
+    CUDA_CHECK(cudaFree(d_pairs));
+    CUDA_CHECK(cudaFree(d_ticket));
+    return 0;
 }
