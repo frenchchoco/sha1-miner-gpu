@@ -16,20 +16,17 @@
         }                                                                              \
     } while (0)
 
-constexpr uint32_t  BATCH      = 1 << 22;  // 4 ,194 ,304 candidates per launch
+constexpr uint32_t  BATCH      = 1 << 22;
 constexpr size_t    MSG_BYTES  = 32;
 constexpr size_t    OUT_BYTES  = 20;
 
-// Forward declaration of the kernel exported from kernel.cu
 extern __global__ void sha1_double_kernel(const uint8_t*, uint8_t*, uint32_t);
 
 int main()
 {
-    // ---------------- Host buffers ------------------------------------------
     std::vector<uint8_t> h_msg(BATCH * MSG_BYTES);
     std::vector<uint8_t> h_out(BATCH * OUT_BYTES);
 
-    // ---------------- Device buffers ----------------------------------------
     uint8_t *d_msg{}, *d_out{};
     CHECK(cudaMalloc(&d_msg, h_msg.size()));
     CHECK(cudaMalloc(&d_out, h_out.size()));
@@ -40,7 +37,6 @@ int main()
         CHECK(cudaMemcpy(d_msg, h_msg.data(), h_msg.size(),
                          cudaMemcpyHostToDevice));
 
-        // Launch grid: one 256-thread block per 256 messages
         constexpr int THREADS = 256;
         dim3 blockDim(THREADS);
         dim3 gridDim((BATCH + THREADS - 1) / THREADS);
@@ -51,7 +47,6 @@ int main()
         CHECK(cudaMemcpy(h_out.data(), d_out, h_out.size(),
                          cudaMemcpyDeviceToHost));
 
-        // ---------------- Collision check on CPU ----------------------------
         std::unordered_map<uint64_t, uint32_t> seen;
         for (uint32_t i = 0; i < BATCH; ++i) {
             std::span<const uint8_t> digest(&h_out[i * OUT_BYTES], OUT_BYTES);
