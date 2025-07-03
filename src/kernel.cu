@@ -1,4 +1,3 @@
-#include "sha1_gpu.cuh"
 #include "job_constants.cuh"
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
