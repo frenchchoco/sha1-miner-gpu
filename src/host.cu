@@ -74,7 +74,7 @@ struct GPUContext {
         // Calculate optimal configuration based on GPU architecture
         if (properties.major >= 8) {
             // Ampere and newer (RTX 30xx, RTX 40xx, A100)
-            optimal_threads = 512;
+            optimal_threads = 256;
             optimal_blocks = properties.multiProcessorCount * 4;
             use_extreme_kernel = true;
         } else if (properties.major >= 7) {
@@ -304,7 +304,7 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
 
     // Calculate work based on kernel type and configuration
     // The new kernel processes 16 nonces per thread (NONCES_PER_THREAD)
-    uint64_t work_per_kernel = (uint64_t) gpu->optimal_blocks * gpu->optimal_threads * NONCES_PER_THREAD;
+    uint64_t work_per_kernel = static_cast<uint64_t>(gpu->optimal_blocks) * gpu->optimal_threads * NONCES_PER_THREAD;
 
     uint64_t local_seed = base_seed + gpu->device_id * (1ull << 48);
 
