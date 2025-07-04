@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <random>
 #include <cstring>
+#include <deque>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,6 +38,20 @@ extern "C" __global__ void sha1_bitsliced_kernel_correct(uint64_t *, uint32_t *,
 
 extern "C" __global__ void sha1_hashcat_kernel(uint64_t *, uint32_t *, uint64_t);
 
+extern "C" __global__ void sha1_hashcat_extreme_kernel(uint64_t *, uint32_t *, uint64_t);
+
+extern "C" __global__ void sha1_cooperative_groups_kernel(uint64_t *, uint32_t *, uint64_t);
+
+extern "C" __global__ void sha1_multi_hash_kernel(uint64_t *, uint32_t *, uint64_t); // good
+
+extern "C" __global__ void sha1_readonly_cache_kernel(uint64_t *, uint32_t *, uint64_t); // bad
+
+extern "C" __global__ void sha1_simd_vectorized_kernel(uint64_t *, uint32_t *, uint64_t);
+
+extern "C" __global__ void sha1_hybrid_warp_simd_kernel(uint64_t *, uint32_t *, uint64_t); // very good?
+
+extern "C" __global__ void sha1_ldg_optimized_kernel(uint64_t *, uint32_t *, uint64_t); // bad
+
 #define CUDA_CHECK(e) do{ cudaError_t _e=(e); \
     if(_e!=cudaSuccess){ \
         std::cerr << "CUDA Error: " << cudaGetErrorString(_e) \
@@ -56,13 +71,20 @@ enum KernelType {
     KERNEL_VECTORIZED,
     KERNEL_BITSLICED,
     KERNEL_HASHCAT,
-    KERNEL_HASHCAT_EXTREME
+    KERNEL_HASHCAT_EXTREME,
+    KERNEL_COOPERATIVE_GROUPS,
+    KERNEL_MULTI_HASH,
+    KERNEL_READONLY_CACHE,
+    KERNEL_SIMD_VECTORIZED,
+    KERNEL_HYBRID_WARP_SIMD,
+    KERNEL_LDG_OPTIMIZED
 };
 
 // Global state for signal handling
 std::atomic<bool> g_shutdown(false);
 std::atomic<uint64_t> g_total_hashes(0);
 std::atomic<uint32_t> g_total_candidates(0);
+std::atomic<uint64_t> g_total_kernel_launches(0);
 std::chrono::steady_clock::time_point g_start_time;
 
 // Signal handler for graceful shutdown
@@ -79,6 +101,16 @@ void setup_signal_handlers() {
 #endif
 }
 
+// Helper to get kernel name
+const char *getKernelName(KernelType type) {
+    static const char *names[] = {
+        "Standard", "Warp Collaborative", "Vectorized", "Bitsliced",
+        "HashCat", "HashCat Extreme", "Cooperative Groups", "Multi-Hash",
+        "Read-Only Cache", "SIMD Vectorized", "Hybrid Warp-SIMD", "LDG Optimized"
+    };
+    return names[type];
+}
+
 // ==================== GPU Configuration ====================
 struct GPUContext {
     int device_id;
@@ -88,66 +120,156 @@ struct GPUContext {
     std::vector<uint32_t *> d_tickets;
     int optimal_blocks;
     int optimal_threads;
-    uint64_t hashes_processed;
+    std::atomic<uint64_t> hashes_processed;
+    std::atomic<uint64_t> kernels_launched;
     KernelType kernel_type;
     int warps_per_block;
     uint64_t hashes_per_kernel_launch;
 
-    GPUContext(int id, bool force_bitsliced = false, bool use_hashcat = true) : device_id(id), hashes_processed(0) {
+    GPUContext(int id, bool force_bitsliced = false, bool use_hashcat = true,
+               int force_kernel_type = -1) : device_id(id), hashes_processed(0), kernels_launched(0) {
         CUDA_CHECK(cudaSetDevice(device_id));
         CUDA_CHECK(cudaGetDeviceProperties(&properties, device_id));
 
-        // Determine optimal configuration based on GPU
-        if (force_bitsliced) {
-            // Force bitsliced kernel for testing
+        // Determine optimal configuration based on GPU and kernel type
+        if (force_kernel_type >= 0 && force_kernel_type <= 11) {
+            kernel_type = (KernelType) force_kernel_type;
+
+            // Set configuration based on actual kernel implementation
+            switch (kernel_type) {
+                case KERNEL_STANDARD:
+                    optimal_threads = 256;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 8;
+                    // sha1_mining_kernel: NONCES_PER_THREAD = 4
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 4;
+                    break;
+
+                case KERNEL_WARP_COLLABORATIVE:
+                    optimal_threads = 256;
+                    warps_per_block = 8;
+                    optimal_blocks = properties.multiProcessorCount * 32;
+                    // sha1_warp_collaborative_kernel: BATCHES_PER_WARP = 8, 32 hashes per batch
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 8 * 32;
+                    break;
+
+                case KERNEL_VECTORIZED:
+                    optimal_threads = 128;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_vectorized_kernel: 2 nonces per thread
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 2;
+                    break;
+
+                case KERNEL_BITSLICED:
+                    optimal_threads = 128;
+                    warps_per_block = 4;
+                    optimal_blocks = properties.multiProcessorCount * 8;
+                    // sha1_bitsliced_kernel_correct: BATCHES = 4, 32 messages per batch per warp
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 4 * 32;
+                    break;
+
+                case KERNEL_HASHCAT:
+                    optimal_threads = 64;
+                    warps_per_block = 2;
+                    optimal_blocks = properties.multiProcessorCount * 64;
+                    // sha1_hashcat_kernel: HASHES_PER_THREAD = 16
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 16;
+                    break;
+
+                case KERNEL_HASHCAT_EXTREME:
+                    optimal_threads = 128;
+                    warps_per_block = 4;
+                    optimal_blocks = properties.multiProcessorCount * 32;
+                    // sha1_hashcat_extreme_kernel: HASHES_PER_THREAD = 32
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 32;
+                    break;
+
+                case KERNEL_COOPERATIVE_GROUPS:
+                    optimal_threads = 256;
+                    warps_per_block = 8;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_cooperative_groups_kernel: BATCHES = 10, 32 hashes per batch per warp
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 10 * 32;
+                    break;
+
+                case KERNEL_MULTI_HASH:
+                    optimal_threads = 128;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_multi_hash_kernel: HASHES_PER_THREAD = 8
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 8;
+                    break;
+
+                case KERNEL_READONLY_CACHE:
+                    optimal_threads = 256;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_readonly_cache_kernel: NONCES_PER_THREAD = 4
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 4;
+                    break;
+
+                case KERNEL_SIMD_VECTORIZED:
+                    optimal_threads = 256;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_simd_vectorized_kernel: VECTORS_PER_THREAD = 2, 4 hashes per vector
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 2 * 4;
+                    break;
+
+                case KERNEL_HYBRID_WARP_SIMD:
+                    optimal_threads = 128;
+                    warps_per_block = 4;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_hybrid_warp_simd_kernel: BATCHES = 4, HASHES_PER_THREAD = 2, 32 threads per warp
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 4 * 32 * 2;
+                    break;
+
+                case KERNEL_LDG_OPTIMIZED:
+                    optimal_threads = 256;
+                    warps_per_block = optimal_threads / 32;
+                    optimal_blocks = properties.multiProcessorCount * 16;
+                    // sha1_ldg_optimized_kernel: NONCES_PER_THREAD = 6
+                    hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 6;
+                    break;
+            }
+        } else if (force_bitsliced) {
             kernel_type = KERNEL_BITSLICED;
-            optimal_threads = 128; // 4 warps, must be multiple of 32
+            optimal_threads = 128;
             warps_per_block = 4;
             optimal_blocks = properties.multiProcessorCount * 8;
-            // Bitsliced: each warp processes 32 messages * 4 batches = 128 messages
-            hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 128;
+            hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 4 * 32;
         } else if (use_hashcat) {
-            // Use HashCat-style kernels for maximum performance
             if (properties.major >= 8) {
-                // Ampere and newer - use extreme HashCat kernel
-                kernel_type = KERNEL_HASHCAT;
-                optimal_threads = 256;
-                warps_per_block = 8; // 128 threads = 4 warps
-                optimal_blocks = properties.multiProcessorCount * 32 * 100;
-                // Each thread processes 32 hashes
-                hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 64;
+                kernel_type = KERNEL_HASHCAT_EXTREME;
+                optimal_threads = 128;
+                warps_per_block = 4;
+                optimal_blocks = properties.multiProcessorCount * 32;
+                hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 32;
             } else {
-                // Older GPUs - use standard HashCat kernel
                 kernel_type = KERNEL_HASHCAT;
                 optimal_threads = 64;
-                warps_per_block = 2; // 64 threads = 2 warps
+                warps_per_block = 2;
                 optimal_blocks = properties.multiProcessorCount * 64;
-                // Each thread processes 16 hashes
                 hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 16;
             }
         } else if (properties.major >= 7) {
-            // Volta and newer - use warp collaborative
             kernel_type = KERNEL_WARP_COLLABORATIVE;
             optimal_threads = 256;
             warps_per_block = 8;
             optimal_blocks = properties.multiProcessorCount * 32;
-            // Each warp processes 8 batches of 32 = 256 messages
-            hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 256;
+            hashes_per_kernel_launch = (uint64_t) optimal_blocks * warps_per_block * 8 * 32;
         } else if (properties.major >= 6) {
-            // Pascal - use vectorized
             kernel_type = KERNEL_VECTORIZED;
             optimal_threads = 128;
             warps_per_block = 4;
             optimal_blocks = properties.multiProcessorCount * 16;
-            // Each thread processes 2 messages
             hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 2;
         } else {
-            // Older GPUs - use standard
             kernel_type = KERNEL_STANDARD;
             optimal_threads = 256;
             warps_per_block = 8;
             optimal_blocks = properties.multiProcessorCount * 8;
-            // Each thread processes 4 messages
             hashes_per_kernel_launch = (uint64_t) optimal_blocks * optimal_threads * 4;
         }
 
@@ -167,8 +289,7 @@ struct GPUContext {
         d_tickets.resize(num_streams);
 
         for (int i = 0; i < num_streams; i++) {
-            CUDA_CHECK(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking,
-                i % 2)); // Alternate priorities
+            CUDA_CHECK(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, i % 2));
             CUDA_CHECK(cudaMalloc(&d_pairs[i], sizeof(uint64_t) * 4 * RING_SIZE));
             CUDA_CHECK(cudaMalloc(&d_tickets[i], sizeof(uint32_t)));
             CUDA_CHECK(cudaMemsetAsync(d_tickets[i], 0, sizeof(uint32_t), streams[i]));
@@ -192,7 +313,25 @@ struct GPUContext {
                 CUDA_CHECK(cudaFuncSetCacheConfig(sha1_hashcat_kernel, cudaFuncCachePreferL1));
                 break;
             case KERNEL_HASHCAT_EXTREME:
-                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_warp_collaborative_kernel, cudaFuncCachePreferL1));
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_hashcat_extreme_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_COOPERATIVE_GROUPS:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_cooperative_groups_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_MULTI_HASH:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_multi_hash_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_READONLY_CACHE:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_readonly_cache_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_SIMD_VECTORIZED:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_simd_vectorized_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_HYBRID_WARP_SIMD:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_hybrid_warp_simd_kernel, cudaFuncCachePreferL1));
+                break;
+            case KERNEL_LDG_OPTIMIZED:
+                CUDA_CHECK(cudaFuncSetCacheConfig(sha1_ldg_optimized_kernel, cudaFuncCachePreferL1));
                 break;
         }
 
@@ -220,67 +359,107 @@ struct GPUContext {
         std::cout << "Memory Bus    : " << properties.memoryBusWidth << " bits\n";
         std::cout << "L2 Cache      : " << properties.l2CacheSize / (1024 * 1024) << " MB\n";
 
-        const char *kernel_names[] = {
-            "Standard", "Warp Collaborative", "Vectorized", "Bitsliced", "HashCat", "HashCat Extreme"
-        };
-        std::cout << "Kernel        : " << kernel_names[kernel_type] << "\n";
+        std::cout << "Kernel        : " << getKernelName(kernel_type) << "\n";
         std::cout << "Configuration : " << optimal_blocks << " blocks × " << optimal_threads << " threads\n";
-        if (kernel_type == KERNEL_HASHCAT || kernel_type == KERNEL_HASHCAT_EXTREME) {
-            int hashes_per_thread = (kernel_type == KERNEL_HASHCAT_EXTREME) ? 32 : 16;
-            std::cout << "Hashes/Thread : " << hashes_per_thread << "\n";
-        } else {
-            std::cout << "Warps/Block   : " << warps_per_block << "\n";
+
+        // Display kernel-specific information
+        switch (kernel_type) {
+            case KERNEL_STANDARD:
+            case KERNEL_READONLY_CACHE:
+                std::cout << "Work per thread: 4 hashes\n";
+                break;
+            case KERNEL_WARP_COLLABORATIVE:
+                std::cout << "Work per warp: 8 batches × 32 hashes = 256 hashes\n";
+                break;
+            case KERNEL_VECTORIZED:
+                std::cout << "Work per thread: 2 hashes\n";
+                break;
+            case KERNEL_BITSLICED:
+                std::cout << "Work per warp: 4 batches × 32 messages = 128 hashes\n";
+                break;
+            case KERNEL_HASHCAT:
+                std::cout << "Work per thread: 16 hashes\n";
+                break;
+            case KERNEL_HASHCAT_EXTREME:
+                std::cout << "Work per thread: 32 hashes\n";
+                break;
+            case KERNEL_COOPERATIVE_GROUPS:
+                std::cout << "Work per warp: 10 batches × 32 hashes = 320 hashes\n";
+                break;
+            case KERNEL_MULTI_HASH:
+                std::cout << "Work per thread: 8 hashes\n";
+                break;
+            case KERNEL_SIMD_VECTORIZED:
+                std::cout << "Work per thread: 2 vectors × 4 hashes = 8 hashes\n";
+                break;
+            case KERNEL_HYBRID_WARP_SIMD:
+                std::cout << "Work per warp: 4 batches × 64 hashes = 256 hashes\n";
+                break;
+            case KERNEL_LDG_OPTIMIZED:
+                std::cout << "Work per thread: 6 hashes\n";
+                break;
         }
+
         std::cout << "Hashes/Launch : " << hashes_per_kernel_launch << "\n";
         std::cout << "Streams       : " << streams.size() << "\n\n";
     }
 
     void launchKernel(cudaStream_t stream, uint64_t seed) {
+        int stream_idx = getStreamIndex(stream);
+
         switch (kernel_type) {
             case KERNEL_STANDARD:
                 sha1_mining_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
             case KERNEL_WARP_COLLABORATIVE:
                 sha1_warp_collaborative_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
             case KERNEL_VECTORIZED:
                 sha1_vectorized_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
             case KERNEL_BITSLICED:
-                // Bitsliced kernel requires thread count to be multiple of 32
                 sha1_bitsliced_kernel_correct<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
             case KERNEL_HASHCAT:
                 sha1_hashcat_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
             case KERNEL_HASHCAT_EXTREME:
-                sha1_warp_collaborative_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
-                    d_pairs[getStreamIndex(stream)],
-                    d_tickets[getStreamIndex(stream)],
-                    seed
-                );
+                sha1_hashcat_extreme_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_COOPERATIVE_GROUPS:
+                sha1_cooperative_groups_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_MULTI_HASH:
+                sha1_multi_hash_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_READONLY_CACHE:
+                sha1_readonly_cache_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_SIMD_VECTORIZED:
+                sha1_simd_vectorized_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_HYBRID_WARP_SIMD:
+                sha1_hybrid_warp_simd_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
+                break;
+            case KERNEL_LDG_OPTIMIZED:
+                sha1_ldg_optimized_kernel<<<optimal_blocks, optimal_threads, 0, stream>>>(
+                    d_pairs[stream_idx], d_tickets[stream_idx], seed);
                 break;
         }
+
+        kernels_launched++;
+        g_total_kernel_launches.fetch_add(1);
     }
 
 private:
@@ -375,6 +554,7 @@ class PerformanceMonitor {
 private:
     std::chrono::steady_clock::time_point last_update;
     uint64_t last_hashes = 0;
+    uint64_t last_kernel_launches = 0;
     std::mutex monitor_mutex;
     std::vector<double> rate_history;
     const size_t history_size = 12; // 1 minute of 5-second intervals
@@ -396,9 +576,13 @@ public:
             double total_seconds = total_elapsed.count();
 
             uint64_t current_hashes = g_total_hashes.load();
+            uint64_t current_kernel_launches = g_total_kernel_launches.load();
             uint64_t interval_hashes = current_hashes - last_hashes;
+            uint64_t interval_kernel_launches = current_kernel_launches - last_kernel_launches;
+
             double interval_rate = interval_hashes / elapsed.count() / 1e9;
             double average_rate = current_hashes / total_seconds / 1e9;
+            double kernel_rate = interval_kernel_launches / (double) elapsed.count();
 
             // Update rate history
             rate_history.push_back(interval_rate);
@@ -418,12 +602,13 @@ public:
                     << current_hashes / 1e12 << "T | "
                     << "Rate: " << interval_rate << " GH/s (avg: "
                     << average_rate << " GH/s, MA: " << moving_avg << ") | "
+                    << "Kernels/s: " << std::fixed << std::setprecision(0) << kernel_rate << " | "
                     << "Candidates: " << g_total_candidates.load();
 
             // Per-GPU stats
             std::cout << " | GPU: ";
             for (size_t i = 0; i < gpus.size(); i++) {
-                double gpu_rate = gpus[i]->hashes_processed / total_seconds / 1e9;
+                double gpu_rate = gpus[i]->hashes_processed.load() / total_seconds / 1e9;
                 std::cout << "[" << i << ":" << std::fixed << std::setprecision(1)
                         << gpu_rate << "] ";
             }
@@ -431,6 +616,7 @@ public:
 
             last_update = now;
             last_hashes = current_hashes;
+            last_kernel_launches = current_kernel_launches;
         }
     }
 
@@ -439,6 +625,7 @@ public:
         auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_start_time);
         double total_seconds = total_elapsed.count();
         uint64_t total_hashes = g_total_hashes.load();
+        uint64_t total_kernel_launches = g_total_kernel_launches.load();
         double average_rate = total_hashes / total_seconds / 1e9;
 
         std::cout << "\n\n=== Final Statistics ===\n";
@@ -446,6 +633,9 @@ public:
         std::cout << "Total Hashes  : " << std::fixed << std::setprecision(3)
                 << total_hashes / 1e12 << " trillion\n";
         std::cout << "Average Rate  : " << average_rate << " GH/s\n";
+        std::cout << "Kernel Launches: " << total_kernel_launches << "\n";
+        std::cout << "Avg Kernel Time: " << std::fixed << std::setprecision(2)
+                << (total_seconds * 1000.0) / total_kernel_launches << " ms\n";
         std::cout << "Candidates    : " << g_total_candidates.load() << "\n";
         std::cout << "Efficiency    : " << std::scientific << std::setprecision(2)
                 << (double) g_total_candidates.load() / total_hashes * 100 << "%\n";
@@ -475,53 +665,156 @@ void gpu_worker(GPUContext *gpu, ResultHandler *results, uint64_t base_seed) {
     std::vector<uint64_t> h_pairs;
     h_pairs.resize(RING_SIZE * 4);
 
+    // Create events for accurate timing
+    std::vector<cudaEvent_t> start_events(gpu->streams.size());
+    std::vector<cudaEvent_t> stop_events(gpu->streams.size());
+    std::vector<bool> kernel_running(gpu->streams.size(), false);
+    std::vector<uint64_t> kernel_seeds(gpu->streams.size());
+
+    for (size_t i = 0; i < gpu->streams.size(); i++) {
+        CUDA_CHECK(cudaEventCreate(&start_events[i]));
+        CUDA_CHECK(cudaEventCreate(&stop_events[i]));
+    }
+
+    // Keep track of kernels launched for debugging
+    uint64_t local_kernels_launched = 0;
+    auto last_debug_time = std::chrono::steady_clock::now();
+
     while (!g_shutdown.load()) {
-        // Launch kernels on all streams
+        // Launch kernels on available streams
         for (size_t s = 0; s < gpu->streams.size(); s++) {
-            gpu->launchKernel(gpu->streams[s], local_seed);
-            local_seed += gpu->hashes_per_kernel_launch;
-        }
+            if (!kernel_running[s]) {
+                // Record start time
+                CUDA_CHECK(cudaEventRecord(start_events[s], gpu->streams[s]));
 
-        // Check results from completed streams
-        for (size_t s = 0; s < gpu->streams.size(); s++) {
-            // Use events for more efficient synchronization
-            cudaError_t err = cudaStreamQuery(gpu->streams[s]);
-            if (err == cudaSuccess) {
-                uint32_t found = 0;
-                CUDA_CHECK(cudaMemcpyAsync(&found, gpu->d_tickets[s], sizeof(uint32_t),
-                    cudaMemcpyDeviceToHost, gpu->streams[s]));
-                CUDA_CHECK(cudaStreamSynchronize(gpu->streams[s]));
+                // Launch kernel
+                gpu->launchKernel(gpu->streams[s], local_seed);
+                kernel_seeds[s] = local_seed;
+                local_seed += gpu->hashes_per_kernel_launch;
 
-                if (found > 0) {
-                    g_total_candidates.fetch_add(found);
+                // Record stop time
+                CUDA_CHECK(cudaEventRecord(stop_events[s], gpu->streams[s]));
 
-                    uint32_t to_copy = std::min(found, RING_SIZE);
-                    CUDA_CHECK(cudaMemcpyAsync(h_pairs.data(), gpu->d_pairs[s],
-                        sizeof(uint64_t) * 4 * to_copy, cudaMemcpyDeviceToHost, gpu->streams[s]));
-                    CUDA_CHECK(cudaStreamSynchronize(gpu->streams[s]));
-
-                    results->saveResults(h_pairs.data(), to_copy, gpu->device_id);
-
-                    // Reset ticket
-                    CUDA_CHECK(cudaMemsetAsync(gpu->d_tickets[s], 0, sizeof(uint32_t), gpu->streams[s]));
-                }
-
-                // Update counters
-                g_total_hashes.fetch_add(gpu->hashes_per_kernel_launch);
-                gpu->hashes_processed += gpu->hashes_per_kernel_launch;
-            } else if (err != cudaErrorNotReady) {
-                CUDA_CHECK(err);
+                kernel_running[s] = true;
+                local_kernels_launched++;
             }
         }
 
-        // Small delay to prevent CPU spinning
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        // Check completed kernels
+        for (size_t s = 0; s < gpu->streams.size(); s++) {
+            if (kernel_running[s]) {
+                cudaError_t err = cudaEventQuery(stop_events[s]);
+                if (err == cudaSuccess) {
+                    // Kernel completed
+                    kernel_running[s] = false;
+
+                    // Check for results
+                    uint32_t found = 0;
+                    CUDA_CHECK(cudaMemcpyAsync(&found, gpu->d_tickets[s], sizeof(uint32_t),
+                        cudaMemcpyDeviceToHost, gpu->streams[s]));
+                    CUDA_CHECK(cudaStreamSynchronize(gpu->streams[s]));
+
+                    if (found > 0) {
+                        g_total_candidates.fetch_add(found);
+
+                        uint32_t to_copy = std::min(found, RING_SIZE);
+                        CUDA_CHECK(cudaMemcpyAsync(h_pairs.data(), gpu->d_pairs[s],
+                            sizeof(uint64_t) * 4 * to_copy, cudaMemcpyDeviceToHost, gpu->streams[s]));
+                        CUDA_CHECK(cudaStreamSynchronize(gpu->streams[s]));
+
+                        results->saveResults(h_pairs.data(), to_copy, gpu->device_id);
+
+                        // Reset ticket
+                        CUDA_CHECK(cudaMemsetAsync(gpu->d_tickets[s], 0, sizeof(uint32_t), gpu->streams[s]));
+                    }
+
+                    // Update hash count
+                    g_total_hashes.fetch_add(gpu->hashes_per_kernel_launch);
+                    gpu->hashes_processed.fetch_add(gpu->hashes_per_kernel_launch);
+                } else if (err != cudaErrorNotReady) {
+                    CUDA_CHECK(err);
+                }
+            }
+        }
+
+        // Periodic debug output (every 30 seconds)
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_debug_time);
+        if (elapsed.count() >= 30 && gpu->device_id == 0) {
+            double kernels_per_sec = local_kernels_launched / (double) elapsed.count();
+            std::cout << "\n[GPU 0 Debug] Kernels: " << local_kernels_launched
+                    << " in " << elapsed.count() << "s = "
+                    << std::fixed << std::setprecision(1) << kernels_per_sec
+                    << " kernels/sec, Expected: "
+                    << (kernels_per_sec * gpu->hashes_per_kernel_launch / 1e9)
+                    << " GH/s\n" << std::flush;
+            local_kernels_launched = 0;
+            last_debug_time = now;
+        }
+
+        // Small yield to prevent CPU spinning
+        std::this_thread::yield();
     }
 
-    // Ensure all streams finish
+    // Cleanup
     for (auto &stream: gpu->streams) {
         CUDA_CHECK(cudaStreamSynchronize(stream));
     }
+
+    for (size_t i = 0; i < gpu->streams.size(); i++) {
+        CUDA_CHECK(cudaEventDestroy(start_events[i]));
+        CUDA_CHECK(cudaEventDestroy(stop_events[i]));
+    }
+}
+
+// ==================== Benchmark Utilities ====================
+void benchmarkKernel(GPUContext *gpu, int warmup_runs = 10, int test_runs = 100) {
+    CUDA_CHECK(cudaSetDevice(gpu->device_id));
+
+    std::cout << "\n=== Benchmarking Kernel Performance ===\n";
+    std::cout << "Kernel: " << getKernelName(gpu->kernel_type) << "\n";
+    std::cout << "Configuration: " << gpu->optimal_blocks << " blocks × "
+            << gpu->optimal_threads << " threads\n";
+    std::cout << "Hashes per launch: " << gpu->hashes_per_kernel_launch << "\n\n";
+
+    // Warmup
+    for (int i = 0; i < warmup_runs; i++) {
+        gpu->launchKernel(gpu->streams[0], i * gpu->hashes_per_kernel_launch);
+    }
+    CUDA_CHECK(cudaStreamSynchronize(gpu->streams[0]));
+
+    // Create events for timing
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    // Time the kernel
+    CUDA_CHECK(cudaEventRecord(start, gpu->streams[0]));
+
+    for (int i = 0; i < test_runs; i++) {
+        gpu->launchKernel(gpu->streams[0], i * gpu->hashes_per_kernel_launch);
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop, gpu->streams[0]));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float milliseconds = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+
+    double seconds = milliseconds / 1000.0;
+    uint64_t total_hashes = (uint64_t) test_runs * gpu->hashes_per_kernel_launch;
+    double ghps = total_hashes / seconds / 1e9;
+
+    std::cout << "Results:\n";
+    std::cout << "  Total time: " << milliseconds << " ms\n";
+    std::cout << "  Time per kernel: " << milliseconds / test_runs << " ms\n";
+    std::cout << "  Total hashes: " << total_hashes << "\n";
+    std::cout << "  Performance: " << ghps << " GH/s\n";
+    std::cout << "  Theoretical max (all streams): " << ghps * gpu->streams.size()
+            << " GH/s\n\n";
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
 }
 
 // ==================== Configuration Parser ====================
@@ -533,6 +826,8 @@ struct Config {
     int benchmark_seconds = 60;
     bool force_bitsliced = false;
     bool no_hashcat = false;
+    int force_kernel = -1; // -1 = auto, 0-11 = specific kernel
+    bool quick_bench = false;
 };
 
 Config parse_arguments(int argc, char **argv) {
@@ -563,10 +858,29 @@ Config parse_arguments(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 config.benchmark_seconds = std::stoi(argv[++i]);
             }
+        } else if (arg == "--quick-bench") {
+            config.quick_bench = true;
         } else if (arg == "--bitsliced") {
             config.force_bitsliced = true;
         } else if (arg == "--no-hashcat") {
             config.no_hashcat = true;
+        } else if (arg == "--kernel" && i + 1 < argc) {
+            config.force_kernel = std::stoi(argv[++i]);
+        } else if (arg == "--list-kernels") {
+            std::cout << "Available kernels:\n";
+            std::cout << "  0: Standard (4 hashes/thread)\n";
+            std::cout << "  1: Warp Collaborative (256 hashes/warp) - FASTEST on modern GPUs\n";
+            std::cout << "  2: Vectorized (2 hashes/thread)\n";
+            std::cout << "  3: Bitsliced (128 hashes/warp)\n";
+            std::cout << "  4: HashCat (16 hashes/thread)\n";
+            std::cout << "  5: HashCat Extreme (32 hashes/thread) - Best for Ampere+\n";
+            std::cout << "  6: Cooperative Groups (320 hashes/warp)\n";
+            std::cout << "  7: Multi-Hash (8 hashes/thread)\n";
+            std::cout << "  8: Read-Only Cache (4 hashes/thread)\n";
+            std::cout << "  9: SIMD Vectorized (8 hashes/thread)\n";
+            std::cout << " 10: Hybrid Warp-SIMD (256 hashes/warp)\n";
+            std::cout << " 11: LDG Optimized (6 hashes/thread)\n";
+            std::exit(0);
         } else if (arg == "--help") {
             std::cout << "SHA-1 Collision Miner v3.0\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
@@ -575,8 +889,11 @@ Config parse_arguments(int argc, char **argv) {
             std::cout << "  --output <file>  Output file (default: sha1_collisions.txt)\n";
             std::cout << "  --target <hex>   Target preimage in hex (default: zeros)\n";
             std::cout << "  --benchmark [s]  Run benchmark for s seconds (default: 60)\n";
+            std::cout << "  --quick-bench    Run quick kernel benchmark\n";
             std::cout << "  --bitsliced      Force bitsliced kernel (slower, for testing)\n";
             std::cout << "  --no-hashcat     Use original kernels instead of HashCat-style\n";
+            std::cout << "  --kernel <id>    Force specific kernel (0-11, see --list-kernels)\n";
+            std::cout << "  --list-kernels   List all available kernels\n";
             std::cout << "  --help           Show this help\n\n";
             std::cout << "Example:\n";
             std::cout << "  " << argv[0] << " --gpu 0 --gpu 1 --target ";
@@ -645,13 +962,17 @@ int main(int argc, char **argv) {
 
     if (config.force_bitsliced) {
         std::cout << "NOTE: Using bitsliced kernel (slower, for testing)\n\n";
+    } else if (config.force_kernel >= 0) {
+        std::cout << "NOTE: Forcing kernel " << config.force_kernel << " ("
+                << getKernelName((KernelType) config.force_kernel) << ")\n\n";
     }
 
     // Initialize GPUs
     std::vector<std::unique_ptr<GPUContext> > gpus;
     for (int id: config.gpu_ids) {
         try {
-            gpus.push_back(std::make_unique<GPUContext>(id, config.force_bitsliced, !config.no_hashcat));
+            gpus.push_back(std::make_unique<GPUContext>(
+                id, config.force_bitsliced, !config.no_hashcat, config.force_kernel));
         } catch (const std::exception &e) {
             std::cerr << "Failed to initialize GPU " << id << ": " << e.what() << "\n";
         }
@@ -662,23 +983,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Calculate expected total performance
-    uint64_t total_hashes_per_second = 0;
-    for (const auto &gpu: gpus) {
-        // Estimate based on kernel type and GPU
-        uint64_t gpu_hps;
-        if (gpu->kernel_type == KERNEL_BITSLICED) {
-            // Bitsliced is much slower
-            gpu_hps = gpu->hashes_per_kernel_launch * gpu->streams.size() * 100; // ~10ms per kernel
-        } else if (gpu->kernel_type == KERNEL_HASHCAT || gpu->kernel_type == KERNEL_HASHCAT_EXTREME) {
-            // HashCat kernels are highly optimized
-            gpu_hps = gpu->hashes_per_kernel_launch * gpu->streams.size() * 2000; // ~0.5ms per kernel
-        } else {
-            gpu_hps = gpu->hashes_per_kernel_launch * gpu->streams.size() * 1000; // ~1ms per kernel
+    // Run quick benchmark if requested
+    if (config.quick_bench) {
+        for (auto &gpu: gpus) {
+            benchmarkKernel(gpu.get(), 10, 100);
         }
-        total_hashes_per_second += gpu_hps;
+        return 0;
     }
-    std::cout << "Expected performance: ~" << total_hashes_per_second / 1e9 << " GH/s\n\n";
 
     // Initialize result handler
     ResultHandler results(config.output_file, target_hash, config.target_preimage.data());
@@ -757,14 +1068,16 @@ int main(int argc, char **argv) {
         // Detailed per-GPU stats
         std::cout << "\nPer-GPU Performance:\n";
         for (size_t i = 0; i < gpus.size(); i++) {
-            double gpu_ghps = gpus[i]->hashes_processed / seconds / 1e9;
-            const char *kernel_names[] = {
-                "Standard", "Warp Collaborative", "Vectorized", "Bitsliced", "HashCat", "HashCat Extreme"
-            };
+            uint64_t gpu_hashes = gpus[i]->hashes_processed.load();
+            double gpu_ghps = gpu_hashes / seconds / 1e9;
+            uint64_t gpu_kernels = gpus[i]->kernels_launched.load();
+
             std::cout << "  GPU " << gpus[i]->device_id << " ("
                     << gpus[i]->properties.name << ", "
-                    << kernel_names[gpus[i]->kernel_type] << "): "
-                    << gpu_ghps << " GH/s\n";
+                    << getKernelName(gpus[i]->kernel_type) << "):\n";
+            std::cout << "    Performance: " << gpu_ghps << " GH/s\n";
+            std::cout << "    Kernels launched: " << gpu_kernels << "\n";
+            std::cout << "    Avg kernel time: " << (seconds * 1000.0) / gpu_kernels << " ms\n";
         }
     }
 
