@@ -7,6 +7,9 @@ setlocal enabledelayedexpansion
 :: Initialize GPU backend
 if "%GPU_BACKEND%"=="" set GPU_BACKEND=NVIDIA
 
+:: Manual ROCm path override - uncomment and modify if auto-detection fails
+:: set "ROCM_PATH=C:\Program Files\AMD\ROCm\6.2"
+
 :MAIN_MENU
 cls
 echo =====================================
@@ -133,7 +136,9 @@ if "%GPU_BACKEND%"=="AMD" (
         set VCPKG_CMAKE=
     )
 
-    cmake -B %BUILD_DIR% -G "Ninja" -DCMAKE_BUILD_TYPE=%CMAKE_BUILD_TYPE% -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH="%ROCM_PATH%" %VCPKG_CMAKE%
+    :: Properly quote ROCM_PATH for CMake
+    set "QUOTED_ROCM_PATH=%ROCM_PATH%"
+    cmake -B %BUILD_DIR% -G "Ninja" -DCMAKE_BUILD_TYPE=%CMAKE_BUILD_TYPE% -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH="%QUOTED_ROCM_PATH%" -DHIP_ARCH="%HIP_ARCHITECTURES%" %VCPKG_CMAKE%
 
     if errorlevel 1 (
         echo.
@@ -548,48 +553,84 @@ exit /b 0
 echo Searching for ROCm installation...
 set ROCM_FOUND=0
 
-:: Common ROCm installation paths to check
-set "ROCM_SEARCH_PATHS=C:\Program Files\AMD\ROCm;C:\ROCm;C:\Program Files\ROCm;%ProgramFiles%\AMD\ROCm"
+:: First check if ROCM_PATH environment variable is already set
+if defined ROCM_PATH (
+    if exist "%ROCM_PATH%\bin\hipcc.exe" (
+        echo Using ROCM_PATH from environment: %ROCM_PATH%
+        set ROCM_FOUND=1
+        exit /b 0
+    )
+)
 
-:: First, check paths with version subdirectories
-for %%p in (%ROCM_SEARCH_PATHS%) do (
-    if exist "%%p" (
-        :: Check for versioned subdirectories
-        for /d %%v in ("%%p\*") do (
-            if exist "%%v\bin\hipcc.exe" (
-                set ROCM_PATH=%%v
-                set ROCM_FOUND=1
-                echo Found ROCm at: %%v
-                exit /b 0
-            )
-        )
-        :: Check if ROCm is directly in the path (no version subdirectory)
-        if exist "%%p\bin\hipcc.exe" (
-            set ROCM_PATH=%%p
+:: Method 1: Check Program Files for versioned installations
+echo Checking Program Files for ROCm...
+if exist "C:\Program Files\AMD\ROCm" (
+    for /d %%v in ("C:\Program Files\AMD\ROCm\*") do (
+        if exist "%%v\bin\hipcc.exe" (
+            set "ROCM_PATH=%%v"
             set ROCM_FOUND=1
-            echo Found ROCm at: %%p
+            echo Found ROCm at: %%v
             exit /b 0
         )
     )
 )
 
-:: If not found, try to find through registry (if ROCm installer set it)
+:: Method 2: Check for direct installation without version folder
+if exist "C:\Program Files\AMD\ROCm\bin\hipcc.exe" (
+    set "ROCM_PATH=C:\Program Files\AMD\ROCm"
+    set ROCM_FOUND=1
+    echo Found ROCm at: C:\Program Files\AMD\ROCm
+    exit /b 0
+)
+
+:: Method 3: Check C:\ROCm for versioned installations
+if exist "C:\ROCm" (
+    for /d %%v in ("C:\ROCm\*") do (
+        if exist "%%v\bin\hipcc.exe" (
+            set "ROCM_PATH=%%v"
+            set ROCM_FOUND=1
+            echo Found ROCm at: %%v
+            exit /b 0
+        )
+    )
+)
+
+:: Method 4: Check registry
+echo Checking registry for ROCm installation...
 for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\AMD\ROCm" /v InstallDir 2^>nul') do (
     if exist "%%b\bin\hipcc.exe" (
-        set ROCM_PATH=%%b
+        set "ROCM_PATH=%%b"
         set ROCM_FOUND=1
         echo Found ROCm via registry at: %%b
         exit /b 0
     )
 )
 
+:: Method 5: Check for HIP_PATH environment variable
+if defined HIP_PATH (
+    if exist "%HIP_PATH%\bin\hipcc.exe" (
+        set "ROCM_PATH=%HIP_PATH%"
+        set ROCM_FOUND=1
+        echo Found ROCm via HIP_PATH: %HIP_PATH%
+        exit /b 0
+    )
+)
+
 :: Not found
-echo ERROR: ROCm not found! Please install ROCm or set ROCM_PATH environment variable.
 echo.
-echo Download ROCm from: https://www.amd.com/en/developer/rocm-software.html
+echo ERROR: ROCm not found!
+echo.
+echo Please either:
+echo 1. Install ROCm from: https://www.amd.com/en/developer/rocm-software.html
+echo 2. Set ROCM_PATH environment variable to your ROCm installation directory
+echo    Example: set ROCM_PATH=C:\Program Files\AMD\ROCm\6.2
 echo.
 echo Searched in:
-for %%p in (%ROCM_SEARCH_PATHS%) do echo   - %%p\[version]\
+echo   - C:\Program Files\AMD\ROCm\[version]\
+echo   - C:\Program Files\AMD\ROCm\
+echo   - C:\ROCm\[version]\
+echo   - Windows Registry
+echo   - Environment variables (ROCM_PATH, HIP_PATH)
 echo.
 pause
 exit /b 1
