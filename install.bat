@@ -3,20 +3,20 @@ REM SHA-1 OP_NET Miner - Windows Dependencies Installer
 REM This script installs dependencies with compatible versions
 REM Now supports both NVIDIA and AMD GPUs
 
-REM Check for admin rights
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo This script requires administrator privileges.
-    echo Restarting as administrator...
+REM Simple admin check
+fsutil dirty query %systemdrive% >nul 2>&1
+if errorlevel 1 (
     echo.
-
-    REM Create a temporary VBScript to elevate
-    echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\getadmin.vbs"
-    echo UAC.ShellExecute "%~s0", "%*", "", "runas", 1 >> "%temp%\getadmin.vbs"
-
-    "%temp%\getadmin.vbs"
-    del "%temp%\getadmin.vbs"
-    exit /b
+    echo ========================================
+    echo  ERROR: Administrator rights required!
+    echo ========================================
+    echo.
+    echo Please run this script as Administrator:
+    echo 1. Right-click on install.bat
+    echo 2. Select "Run as administrator"
+    echo.
+    pause
+    exit /b 1
 )
 
 setlocal enabledelayedexpansion
@@ -39,7 +39,7 @@ cls
 echo =====================================
 echo SHA-1 Miner - Dependencies Installer
 echo =====================================
-echo Running as Administrator
+echo Running as Administrator: YES
 echo.
 echo Working directory: %INSTALL_DIR%
 echo.
@@ -97,7 +97,7 @@ if "%HAS_AMD%"=="1" (
     REM Check for AMD ROCm/HIP SDK
     echo %INFO% Checking for AMD HIP SDK installation...
     set "HIP_FOUND=0"
-
+    
     REM Check common HIP SDK installation paths
     if exist "%ProgramFiles%\AMD\ROCm" (
         set "HIP_PATH=%ProgramFiles%\AMD\ROCm"
@@ -115,7 +115,7 @@ if "%HAS_AMD%"=="1" (
         set "HIP_PATH=C:\hip"
         set "HIP_FOUND=1"
     )
-
+    
     if "%HIP_FOUND%"=="1" (
         echo %SUCCESS% AMD HIP SDK found at: !HIP_PATH!
         setx HIP_PATH "!HIP_PATH!" >nul 2>&1
