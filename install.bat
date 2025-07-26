@@ -1,6 +1,7 @@
 @echo off
 REM SHA-1 OP_NET Miner - Windows Dependencies Installer
 REM This script installs dependencies with compatible versions
+REM Now supports both NVIDIA and AMD GPUs
 
 setlocal enabledelayedexpansion
 
@@ -26,25 +27,91 @@ echo.
 echo Working directory: %INSTALL_DIR%
 echo.
 
+REM Detect GPU type
+set "GPU_TYPE=NONE"
+set "HAS_NVIDIA=0"
+set "HAS_AMD=0"
+
 REM Check for NVIDIA GPU
 echo %INFO% Checking for NVIDIA GPU...
 wmic path win32_VideoController get name 2>nul | find /i "NVIDIA" >nul
-if errorlevel 1 (
-    echo %WARNING% No NVIDIA GPU detected.
-    echo          AMD GPUs are not yet supported on Windows.
+if not errorlevel 1 (
+    set "HAS_NVIDIA=1"
+    set "GPU_TYPE=NVIDIA"
+    echo %SUCCESS% NVIDIA GPU detected.
+)
+
+REM Check for AMD GPU
+echo %INFO% Checking for AMD GPU...
+wmic path win32_VideoController get name 2>nul | find /i "AMD" >nul
+if not errorlevel 1 (
+    set "HAS_AMD=1"
+    set "GPU_TYPE=AMD"
+    echo %SUCCESS% AMD GPU detected.
+)
+
+wmic path win32_VideoController get name 2>nul | find /i "Radeon" >nul
+if not errorlevel 1 (
+    set "HAS_AMD=1"
+    set "GPU_TYPE=AMD"
+    echo %SUCCESS% AMD Radeon GPU detected.
+)
+
+if "%GPU_TYPE%"=="NONE" (
+    echo %WARNING% No supported GPU detected.
+    echo          The miner requires either NVIDIA or AMD GPU.
     echo          Continuing with dependency installation...
-    echo.
 )
 echo.
 
-REM Check for CUDA
-echo %INFO% Checking for CUDA installation...
-if "%CUDA_PATH%"=="" (
-    echo %WARNING% CUDA not found. You'll need CUDA Toolkit for building:
-    echo           https://developer.nvidia.com/cuda-downloads
-    echo.
-) else (
-    echo %SUCCESS% CUDA found at: %CUDA_PATH%
+REM GPU-specific checks
+if "%HAS_NVIDIA%"=="1" (
+    REM Check for CUDA
+    echo %INFO% Checking for CUDA installation...
+    if "%CUDA_PATH%"=="" (
+        echo %WARNING% CUDA not found. You'll need CUDA Toolkit for NVIDIA GPUs:
+        echo           https://developer.nvidia.com/cuda-downloads
+        echo.
+    ) else (
+        echo %SUCCESS% CUDA found at: %CUDA_PATH%
+    )
+)
+
+if "%HAS_AMD%"=="1" (
+    REM Check for AMD ROCm/HIP SDK
+    echo %INFO% Checking for AMD HIP SDK installation...
+    set "HIP_FOUND=0"
+
+    REM Check common HIP SDK installation paths
+    if exist "%ProgramFiles%\AMD\ROCm" (
+        set "HIP_PATH=%ProgramFiles%\AMD\ROCm"
+        set "HIP_FOUND=1"
+    )
+    if exist "%ProgramFiles%\AMD\HIP SDK" (
+        set "HIP_PATH=%ProgramFiles%\AMD\HIP SDK"
+        set "HIP_FOUND=1"
+    )
+    if exist "C:\Program Files\AMD\ROCm" (
+        set "HIP_PATH=C:\Program Files\AMD\ROCm"
+        set "HIP_FOUND=1"
+    )
+    if exist "C:\hip" (
+        set "HIP_PATH=C:\hip"
+        set "HIP_FOUND=1"
+    )
+
+    if "%HIP_FOUND%"=="1" (
+        echo %SUCCESS% AMD HIP SDK found at: !HIP_PATH!
+        setx HIP_PATH "!HIP_PATH!" >nul 2>&1
+        setx ROCM_PATH "!HIP_PATH!" >nul 2>&1
+    ) else (
+        echo %WARNING% AMD HIP SDK not found. For AMD GPU support, install:
+        echo           AMD ROCm/HIP SDK: https://rocm.docs.amd.com/en/latest/deploy/windows/index.html
+        echo           OR use Windows Subsystem for Linux (WSL2) with ROCm
+        echo.
+        echo %INFO% Note: Full AMD GPU support is better on Linux.
+        echo        Consider using WSL2 with Ubuntu and ROCm for best performance.
+    )
 )
 echo.
 
@@ -68,6 +135,8 @@ if errorlevel 1 (
     echo %WARNING% CMake not found. You'll need CMake for building:
     echo           https://cmake.org/download/
     echo.
+) else (
+    echo %SUCCESS% CMake found
 )
 echo.
 
@@ -83,6 +152,8 @@ if "%VS_FOUND%"=="0" (
     echo %WARNING% Visual Studio 2022 not found. You'll need it for building:
     echo           https://visualstudio.microsoft.com/downloads/
     echo.
+) else (
+    echo %SUCCESS% Visual Studio 2022 found
 )
 echo.
 
@@ -192,3 +263,76 @@ echo     * boost-thread
 echo     * boost-program-options
 echo     * boost-asio
 echo     * boost-beast
+echo     * boost-chrono
+echo     * boost-atomic
+echo     * boost-date-time
+echo     * boost-regex
+echo     * boost-random
+echo   - nlohmann-json (JSON parsing)
+echo   - zlib (compression)
+echo.
+echo GPU Support Status:
+if "%HAS_NVIDIA%"=="1" (
+    echo   - NVIDIA GPU: Detected
+    if not "%CUDA_PATH%"=="" (
+        echo   - CUDA: Installed at %CUDA_PATH%
+    ) else (
+        echo   - CUDA: Not installed - required for NVIDIA GPUs
+    )
+)
+if "%HAS_AMD%"=="1" (
+    echo   - AMD GPU: Detected
+    if "%HIP_FOUND%"=="1" (
+        echo   - HIP SDK: Installed at !HIP_PATH!
+    ) else (
+        echo   - HIP SDK: Not installed - required for AMD GPUs
+        echo.
+        echo   %INFO% For AMD GPU support on Windows:
+        echo         1. Install AMD HIP SDK from AMD website
+        echo         2. OR use WSL2 with Ubuntu and ROCm (recommended)
+    )
+)
+if "%GPU_TYPE%"=="NONE" (
+    echo   - No supported GPU detected
+)
+echo.
+echo Next steps:
+echo   1. Make sure all required tools are installed:
+if "%VS_FOUND%"=="0" (
+    echo      - Install Visual Studio 2022
+)
+if "%HAS_NVIDIA%"=="1" if "%CUDA_PATH%"=="" (
+    echo      - Install CUDA Toolkit
+)
+if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
+    echo      - Install AMD HIP SDK or use WSL2 with ROCm
+)
+echo   2. Configure the project:
+if "%HAS_NVIDIA%"=="1" (
+    echo      cmake --preset windows-ninja-release
+)
+if "%HAS_AMD%"=="1" (
+    echo      cmake --preset windows-ninja-release -DUSE_HIP=ON
+    echo      Note: Full AMD support may require WSL2 with Linux
+)
+echo   3. Build the project:
+echo      cmake --build --preset windows-release
+echo.
+if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
+    echo %WARNING% AMD GPU Windows Support Note:
+    echo.
+    echo AMD GPU compute support on Windows is limited. For best performance
+    echo and compatibility, consider using:
+    echo.
+    echo Option 1: WSL2 with Ubuntu and ROCm
+    echo   - Install WSL2: wsl --install
+    echo   - Install Ubuntu from Microsoft Store
+    echo   - Follow Linux ROCm installation guide
+    echo.
+    echo Option 2: Native Windows HIP SDK (experimental)
+    echo   - Download from AMD ROCm website
+    echo   - May have limited GPU architecture support
+    echo.
+)
+echo Press any key to exit...
+pause >nul
