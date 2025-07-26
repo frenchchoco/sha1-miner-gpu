@@ -80,6 +80,13 @@ if "%GPU_TYPE%"=="NONE" (
 )
 echo.
 
+REM Determine which triplet to use based on GPU
+set "VCPKG_TRIPLET=x64-windows"
+if "%HAS_AMD%"=="1" (
+    echo %INFO% AMD GPU detected - using static libraries for compatibility
+    set "VCPKG_TRIPLET=x64-windows-static"
+)
+
 REM GPU-specific checks
 if "%HAS_NVIDIA%"=="1" (
     REM Check for CUDA
@@ -95,34 +102,26 @@ if "%HAS_NVIDIA%"=="1" (
 
 if "%HAS_AMD%"=="1" (
     REM Check for AMD ROCm/HIP SDK
-    echo %INFO% Checking for AMD HIP SDK installation...
-    set "HIP_FOUND=0"
-    
-    REM Check common HIP SDK installation paths
+    echo %INFO% Checking for AMD ROCm installation...
+    set "ROCM_FOUND=0"
+
+    REM Check common ROCm installation paths
     if exist "%ProgramFiles%\AMD\ROCm" (
-        set "HIP_PATH=%ProgramFiles%\AMD\ROCm"
-        set "HIP_FOUND=1"
+        for /d %%v in ("%ProgramFiles%\AMD\ROCm\*") do (
+            if exist "%%v\bin\hipcc.bin.exe" (
+                set "ROCM_PATH=%%v"
+                set "ROCM_FOUND=1"
+            )
+        )
     )
-    if exist "%ProgramFiles%\AMD\HIP SDK" (
-        set "HIP_PATH=%ProgramFiles%\AMD\HIP SDK"
-        set "HIP_FOUND=1"
-    )
-    if exist "C:\Program Files\AMD\ROCm" (
-        set "HIP_PATH=C:\Program Files\AMD\ROCm"
-        set "HIP_FOUND=1"
-    )
-    if exist "C:\hip" (
-        set "HIP_PATH=C:\hip"
-        set "HIP_FOUND=1"
-    )
-    
-    if "%HIP_FOUND%"=="1" (
-        echo %SUCCESS% AMD HIP SDK found at: !HIP_PATH!
-        setx HIP_PATH "!HIP_PATH!" >nul 2>&1
-        setx ROCM_PATH "!HIP_PATH!" >nul 2>&1
+
+    if "%ROCM_FOUND%"=="1" (
+        echo %SUCCESS% AMD ROCm found at: !ROCM_PATH!
+        setx ROCM_PATH "!ROCM_PATH!" >nul 2>&1
     ) else (
-        echo %WARNING% AMD HIP SDK not found. For AMD GPU support, install:
-        echo           AMD ROCm/HIP SDK: https://rocm.docs.amd.com/en/latest/deploy/windows/index.html
+        echo %WARNING% AMD ROCm not found. For AMD GPU support, install:
+        echo           AMD ROCm: https://rocm.docs.amd.com/en/latest/deploy/windows/index.html
+        echo           (Version 6.2 or later recommended)
         echo.
     )
 )
@@ -201,13 +200,13 @@ if exist "vcpkg\vcpkg.exe" (
 echo.
 
 REM Use classic mode to install specific versions
-echo %INFO% Installing C++ dependencies with compatible versions...
+echo %INFO% Installing C++ dependencies with triplet: %VCPKG_TRIPLET%
 echo %INFO% This will take 10-30 minutes on first run...
 echo.
 
 REM Install dependencies one by one
 echo %INFO% [1/4] Installing OpenSSL...
-vcpkg\vcpkg install openssl:x64-windows
+vcpkg\vcpkg install openssl:%VCPKG_TRIPLET%
 if errorlevel 1 (
     echo %WARNING% OpenSSL installation had issues, but continuing...
 )
@@ -217,32 +216,32 @@ echo %INFO% [2/4] Installing Boost - this will take a while...
 echo %INFO% Installing Boost 1.88 including Beast support...
 
 REM Install Boost libraries including Beast
-vcpkg\vcpkg install boost:x64-windows
+vcpkg\vcpkg install boost:%VCPKG_TRIPLET%
 
 if errorlevel 1 (
     echo %WARNING% Boost installation had issues, trying individual components...
-    vcpkg\vcpkg install boost-system:x64-windows
-    vcpkg\vcpkg install boost-thread:x64-windows
-    vcpkg\vcpkg install boost-program-options:x64-windows
-    vcpkg\vcpkg install boost-date-time:x64-windows
-    vcpkg\vcpkg install boost-regex:x64-windows
-    vcpkg\vcpkg install boost-random:x64-windows
-    vcpkg\vcpkg install boost-asio:x64-windows
-    vcpkg\vcpkg install boost-beast:x64-windows
-    vcpkg\vcpkg install boost-chrono:x64-windows
-    vcpkg\vcpkg install boost-atomic:x64-windows
+    vcpkg\vcpkg install boost-system:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-thread:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-program-options:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-date-time:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-regex:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-random:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-asio:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-beast:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-chrono:%VCPKG_TRIPLET%
+    vcpkg\vcpkg install boost-atomic:%VCPKG_TRIPLET%
 )
 
 echo.
 echo %INFO% [3/4] Installing nlohmann-json...
-vcpkg\vcpkg install nlohmann-json:x64-windows
+vcpkg\vcpkg install nlohmann-json:%VCPKG_TRIPLET%
 if errorlevel 1 (
     echo %WARNING% JSON installation had issues, but continuing...
 )
 
 echo.
 echo %INFO% [4/4] Installing zlib...
-vcpkg\vcpkg install zlib:x64-windows
+vcpkg\vcpkg install zlib:%VCPKG_TRIPLET%
 if errorlevel 1 (
     echo %WARNING% zlib installation had issues, but continuing...
 )
@@ -255,8 +254,8 @@ vcpkg\vcpkg integrate install
 REM Set environment variable
 echo.
 echo %INFO% Setting OPENSSL_ROOT_DIR environment variable...
-set "OPENSSL_ROOT_DIR=%INSTALL_DIR%\vcpkg\installed\x64-windows"
-setx OPENSSL_ROOT_DIR "%INSTALL_DIR%\vcpkg\installed\x64-windows" >nul 2>&1
+set "OPENSSL_ROOT_DIR=%INSTALL_DIR%\vcpkg\installed\%VCPKG_TRIPLET%"
+setx OPENSSL_ROOT_DIR "%INSTALL_DIR%\vcpkg\installed\%VCPKG_TRIPLET%" >nul 2>&1
 
 REM Check what Boost version we got
 echo.
@@ -268,7 +267,7 @@ echo =====================================
 echo Dependencies Installation Complete!
 echo =====================================
 echo.
-echo Installed packages:
+echo Installed packages (triplet: %VCPKG_TRIPLET%):
 echo   - OpenSSL - SSL/TLS support
 echo   - Boost 1.88 libraries including Beast:
 echo     * boost-system
@@ -284,6 +283,11 @@ echo     * boost-random
 echo   - nlohmann-json - JSON parsing
 echo   - zlib - compression
 echo.
+if "%HAS_AMD%"=="1" (
+    echo %INFO% Note: Static libraries installed for AMD GPU compatibility
+    echo       hipcc on Windows requires static runtime libraries
+    echo.
+)
 echo GPU Support Status:
 if "%HAS_NVIDIA%"=="1" (
     echo   - NVIDIA GPU: Detected
@@ -295,14 +299,10 @@ if "%HAS_NVIDIA%"=="1" (
 )
 if "%HAS_AMD%"=="1" (
     echo   - AMD GPU: Detected
-    if "%HIP_FOUND%"=="1" (
-        echo   - HIP SDK: Installed at !HIP_PATH!
+    if "%ROCM_FOUND%"=="1" (
+        echo   - ROCm: Installed at !ROCM_PATH!
     ) else (
-        echo   - HIP SDK: Not installed - required for AMD GPUs
-        echo.
-        echo   %INFO% For AMD GPU support on Windows:
-        echo         1. Install AMD HIP SDK from AMD website
-        echo         2. HIP SDK provides ROCm support for Windows
+        echo   - ROCm: Not installed - required for AMD GPUs
     )
 )
 if "%GPU_TYPE%"=="NONE" (
@@ -317,25 +317,25 @@ if "%VS_FOUND%"=="0" (
 if "%HAS_NVIDIA%"=="1" if "%CUDA_PATH%"=="" (
     echo      - Install CUDA Toolkit
 )
-if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
-    echo      - Install AMD HIP SDK
+if "%HAS_AMD%"=="1" if "%ROCM_FOUND%"=="0" (
+    echo      - Install AMD ROCm (version 6.2 or later)
 )
 echo   2. Configure the project:
 if "%HAS_NVIDIA%"=="1" (
     echo      cmake --preset windows-ninja-release
 )
 if "%HAS_AMD%"=="1" (
-    echo      cmake --preset windows-ninja-release -DUSE_HIP=ON
+    echo      For AMD, use the build script:
+    echo      build.bat
+    echo      Then select AMD backend and configure
 )
 echo   3. Build the project:
-echo      cmake --build --preset windows-release
-echo.
-if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
-    echo %WARNING% AMD GPU Windows Support Note:
-    echo.
-    echo AMD GPU compute support on Windows requires the HIP SDK.
-    echo Download and install it from the AMD ROCm website.
-    echo.
+if "%HAS_NVIDIA%"=="1" (
+    echo      cmake --build --preset windows-release
 )
+if "%HAS_AMD%"=="1" (
+    echo      Use build.bat and select Build option
+)
+echo.
 echo Press any key to exit...
 pause >nul
