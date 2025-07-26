@@ -149,7 +149,18 @@ if (GPU_BACKEND STREQUAL "HIP")
     set(ROCM_PATH $ENV{ROCM_PATH})
     if (NOT ROCM_PATH)
         if (WIN32)
-            set(ROCM_PATH "C:/Program Files/AMD/ROCm/6.2")
+            # Check for versioned installations on Windows
+            file(GLOB ROCM_DIRS "C:/Program Files/AMD/ROCm/*")
+            foreach (dir ${ROCM_DIRS})
+                if (EXISTS "${dir}/bin/hipcc.exe")
+                    set(ROCM_PATH ${dir})
+                    break()
+                endif ()
+            endforeach ()
+            # Fallback to non-versioned path
+            if (NOT ROCM_PATH)
+                set(ROCM_PATH "C:/Program Files/AMD/ROCm")
+            endif ()
         else ()
             set(ROCM_PATH "/opt/rocm")
         endif ()
@@ -213,14 +224,28 @@ if (GPU_BACKEND STREQUAL "HIP")
     add_custom_target(hip_kernel_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o)
 
     set(GPU_INCLUDES ${ROCM_PATH}/include)
-    set(GPU_LIBRARIES
-            ${ROCM_PATH}/lib/amdhip64.lib
-            ${ROCM_PATH}/lib/hiprtc.lib
-    )
-    if (EXISTS ${ROCM_PATH}/lib/rocm_smi64.lib)
-        list(APPEND GPU_LIBRARIES ${ROCM_PATH}/lib/rocm_smi64.lib)
-        add_definitions(-DHAS_ROCM_SMI)
+
+    # Set GPU libraries based on platform
+    if (WIN32)
+        set(GPU_LIBRARIES
+                ${ROCM_PATH}/lib/amdhip64.lib
+                ${ROCM_PATH}/lib/hiprtc.lib
+        )
+        if (EXISTS ${ROCM_PATH}/lib/rocm_smi64.lib)
+            list(APPEND GPU_LIBRARIES ${ROCM_PATH}/lib/rocm_smi64.lib)
+            add_definitions(-DHAS_ROCM_SMI)
+        endif ()
+    else ()
+        set(GPU_LIBRARIES
+                ${ROCM_PATH}/lib/libamdhip64.so
+                ${ROCM_PATH}/lib/libhiprtc.so
+        )
+        if (EXISTS ${ROCM_PATH}/lib/librocm_smi64.so)
+            list(APPEND GPU_LIBRARIES ${ROCM_PATH}/lib/librocm_smi64.so)
+            add_definitions(-DHAS_ROCM_SMI)
+        endif ()
     endif ()
+
     set(GPU_DEFINES -DUSE_HIP -D__HIP_PLATFORM_AMD__)
     set(KERNEL_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o")
 
@@ -350,7 +375,7 @@ if (GPU_BACKEND STREQUAL "HIP")
             OpenSSL::Crypto
             Threads::Threads
     )
-    if (USE_STATIC_LIBS AND WIN32)
+    if (USE_STATIC_LIBS AND WIN32 AND MSVC)
         target_link_libraries(sha1_miner PRIVATE
                 LIBCMT.lib
                 libcpmt.lib
