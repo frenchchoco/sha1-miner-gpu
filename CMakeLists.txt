@@ -21,7 +21,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Detect the vcpkg triplet being used
 if (NOT DEFINED VCPKG_TARGET_TRIPLET)
     if (WIN32)
-        set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg target triplet")
+        # For AMD/HIP on Windows, force static triplet due to hipcc limitations
+        if (USE_HIP)
+            set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "vcpkg target triplet")
+            message(STATUS "AMD/HIP detected on Windows - forcing static triplet")
+        else ()
+            set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg target triplet")
+        endif ()
     else ()
         set(VCPKG_TARGET_TRIPLET "x64-linux-dynamic" CACHE STRING "vcpkg target triplet")
     endif ()
@@ -155,16 +161,46 @@ if (GPU_BACKEND STREQUAL "HIP")
     set(ROCM_PATH $ENV{ROCM_PATH})
     if (NOT ROCM_PATH)
         if (WIN32)
-            # Check for versioned installations on Windows
-            file(GLOB ROCM_DIRS "C:/Program Files/AMD/ROCm/*")
-            foreach (dir ${ROCM_DIRS})
-                if (EXISTS "${dir}/bin/hipcc.bin.exe" OR EXISTS "${dir}/bin/hipcc.exe")
-                    set(ROCM_PATH ${dir})
+            # Auto-detect ROCm installation on Windows
+            set(ROCM_SEARCH_PATHS
+                    "C:/Program Files/AMD/ROCm"
+                    "C:/ROCm"
+                    "$ENV{ProgramFiles}/AMD/ROCm"
+            )
+
+            foreach (search_path ${ROCM_SEARCH_PATHS})
+                if (EXISTS "${search_path}")
+                    # Check for versioned subdirectories (e.g., 6.2, 6.1, etc.)
+                    file(GLOB ROCM_VERSIONS "${search_path}/*")
+                    foreach (version_dir ${ROCM_VERSIONS})
+                        if (IS_DIRECTORY "${version_dir}")
+                            # Check if this is a valid ROCm installation
+                            if (EXISTS "${version_dir}/bin/hipcc.bin.exe" OR EXISTS "${version_dir}/bin/hipcc.exe")
+                                set(ROCM_PATH "${version_dir}")
+                                message(STATUS "Auto-detected ROCm at: ${ROCM_PATH}")
+                                break()
+                            endif ()
+                        endif ()
+                    endforeach ()
+
+                    # If versioned not found, check if ROCm is directly in the path
+                    if (NOT ROCM_PATH)
+                        if (EXISTS "${search_path}/bin/hipcc.bin.exe" OR EXISTS "${search_path}/bin/hipcc.exe")
+                            set(ROCM_PATH "${search_path}")
+                            message(STATUS "Auto-detected ROCm at: ${ROCM_PATH}")
+                            break()
+                        endif ()
+                    endif ()
+                endif ()
+
+                if (ROCM_PATH)
                     break()
                 endif ()
             endforeach ()
-            # Fallback to non-versioned path
+
+            # Fallback if not found
             if (NOT ROCM_PATH)
+                message(WARNING "ROCm not auto-detected. Please set ROCM_PATH environment variable.")
                 set(ROCM_PATH "C:/Program Files/AMD/ROCm")
             endif ()
         else ()
