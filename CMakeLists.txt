@@ -32,6 +32,8 @@ else ()
     set(USE_STATIC_LIBS OFF)
 endif ()
 
+message(STATUS "  Library linkage: ${USE_STATIC_LIBS}")
+
 # Find required packages
 find_package(Threads REQUIRED)
 
@@ -457,7 +459,6 @@ message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  GPU Backend: ${GPU_BACKEND}")
 message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
-message(STATUS "  Library linkage: ${USE_STATIC_LIBS}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
