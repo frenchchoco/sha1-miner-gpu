@@ -199,8 +199,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo %INFO% [2/4] Installing Boost (this will take a while)...
-echo %INFO% Installing Boost 1.88 with Beast support...
+echo %INFO% [2/4] Installing Boost - this will take a while...
+echo %INFO% Installing Boost 1.88 including Beast support...
 
 REM Install Boost libraries including Beast
 vcpkg\vcpkg install boost:x64-windows
@@ -256,7 +256,7 @@ echo =====================================
 echo.
 echo Installed packages:
 echo   - OpenSSL (SSL/TLS support)
-echo   - Boost 1.88 libraries with Beast:
+echo   - Boost 1.88 libraries including Beast:
 echo     * boost-system
 echo     * boost-thread
 echo     * boost-program-options
