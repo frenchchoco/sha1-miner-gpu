@@ -512,11 +512,13 @@ if "%ROCM_PATH%"=="" (
 )
 
 :: Validate ROCm installation
-if not exist "%ROCM_PATH%\bin\hipcc.exe" (
-    echo ERROR: hipcc.exe not found in %ROCM_PATH%\bin\
-    echo Attempting to re-detect ROCm installation...
-    call :AUTO_DETECT_ROCM
-    if errorlevel 1 exit /b 1
+if not exist "%ROCM_PATH%\bin\hipcc.bin.exe" (
+    if not exist "%ROCM_PATH%\bin\hipcc.exe" (
+        echo ERROR: hipcc not found in %ROCM_PATH%\bin\
+        echo Attempting to re-detect ROCm installation...
+        call :AUTO_DETECT_ROCM
+        if errorlevel 1 exit /b 1
+    )
 )
 
 :: Extract ROCm version from path if possible
@@ -555,6 +557,11 @@ set ROCM_FOUND=0
 
 :: First check if ROCM_PATH environment variable is already set
 if defined ROCM_PATH (
+    if exist "%ROCM_PATH%\bin\hipcc.bin.exe" (
+        echo Using ROCM_PATH from environment: %ROCM_PATH%
+        set ROCM_FOUND=1
+        exit /b 0
+    )
     if exist "%ROCM_PATH%\bin\hipcc.exe" (
         echo Using ROCM_PATH from environment: %ROCM_PATH%
         set ROCM_FOUND=1
@@ -566,6 +573,12 @@ if defined ROCM_PATH (
 echo Checking Program Files for ROCm...
 if exist "C:\Program Files\AMD\ROCm" (
     for /d %%v in ("C:\Program Files\AMD\ROCm\*") do (
+        if exist "%%v\bin\hipcc.bin.exe" (
+            set "ROCM_PATH=%%v"
+            set ROCM_FOUND=1
+            echo Found ROCm at: %%v
+            exit /b 0
+        )
         if exist "%%v\bin\hipcc.exe" (
             set "ROCM_PATH=%%v"
             set ROCM_FOUND=1
@@ -576,6 +589,12 @@ if exist "C:\Program Files\AMD\ROCm" (
 )
 
 :: Method 2: Check for direct installation without version folder
+if exist "C:\Program Files\AMD\ROCm\bin\hipcc.bin.exe" (
+    set "ROCM_PATH=C:\Program Files\AMD\ROCm"
+    set ROCM_FOUND=1
+    echo Found ROCm at: C:\Program Files\AMD\ROCm
+    exit /b 0
+)
 if exist "C:\Program Files\AMD\ROCm\bin\hipcc.exe" (
     set "ROCM_PATH=C:\Program Files\AMD\ROCm"
     set ROCM_FOUND=1
@@ -586,6 +605,12 @@ if exist "C:\Program Files\AMD\ROCm\bin\hipcc.exe" (
 :: Method 3: Check C:\ROCm for versioned installations
 if exist "C:\ROCm" (
     for /d %%v in ("C:\ROCm\*") do (
+        if exist "%%v\bin\hipcc.bin.exe" (
+            set "ROCM_PATH=%%v"
+            set ROCM_FOUND=1
+            echo Found ROCm at: %%v
+            exit /b 0
+        )
         if exist "%%v\bin\hipcc.exe" (
             set "ROCM_PATH=%%v"
             set ROCM_FOUND=1
@@ -598,6 +623,12 @@ if exist "C:\ROCm" (
 :: Method 4: Check registry
 echo Checking registry for ROCm installation...
 for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\AMD\ROCm" /v InstallDir 2^>nul') do (
+    if exist "%%b\bin\hipcc.bin.exe" (
+        set "ROCM_PATH=%%b"
+        set ROCM_FOUND=1
+        echo Found ROCm via registry at: %%b
+        exit /b 0
+    )
     if exist "%%b\bin\hipcc.exe" (
         set "ROCM_PATH=%%b"
         set ROCM_FOUND=1
@@ -608,6 +639,12 @@ for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\AMD\ROCm" /v InstallDir 2^>
 
 :: Method 5: Check for HIP_PATH environment variable
 if defined HIP_PATH (
+    if exist "%HIP_PATH%\bin\hipcc.bin.exe" (
+        set "ROCM_PATH=%HIP_PATH%"
+        set ROCM_FOUND=1
+        echo Found ROCm via HIP_PATH: %HIP_PATH%
+        exit /b 0
+    )
     if exist "%HIP_PATH%\bin\hipcc.exe" (
         set "ROCM_PATH=%HIP_PATH%"
         set ROCM_FOUND=1
@@ -703,8 +740,16 @@ echo.
 echo Checking ROCm components:
 
 :: Check hipcc
-if exist "%ROCM_PATH%\bin\hipcc.exe" (
-    echo [✓] hipcc found
+if exist "%ROCM_PATH%\bin\hipcc.bin.exe" (
+    echo [✓] hipcc found (hipcc.bin.exe)
+    "%ROCM_PATH%\bin\hipcc.bin.exe" --version >nul 2>&1
+    if !errorlevel!==0 (
+        echo [✓] hipcc is functional
+    ) else (
+        echo [!] hipcc found but not functional
+    )
+) else if exist "%ROCM_PATH%\bin\hipcc.exe" (
+    echo [✓] hipcc found (hipcc.exe)
     "%ROCM_PATH%\bin\hipcc.exe" --version >nul 2>&1
     if !errorlevel!==0 (
         echo [✓] hipcc is functional
