@@ -18,25 +18,43 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Export compile commands
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Force vcpkg triplet to static
-set(VCPKG_TARGET_TRIPLET x64-windows-static CACHE STRING "vcpkg target triplet")
+# Detect the vcpkg triplet being used
+if (NOT DEFINED VCPKG_TARGET_TRIPLET)
+    if (WIN32)
+        set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg target triplet")
+    endif ()
+endif ()
+
+# Set static/dynamic based on triplet
+if (VCPKG_TARGET_TRIPLET MATCHES ".*-static$")
+    set(USE_STATIC_LIBS ON)
+else ()
+    set(USE_STATIC_LIBS OFF)
+endif ()
 
 # Find required packages
 find_package(Threads REQUIRED)
 
 # Find OpenSSL with vcpkg hints
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
-    set(OPENSSL_USE_STATIC_LIBS ON)
-    set(OPENSSL_MSVC_STATIC_RT ON)
+    # Match the vcpkg build type
+    if (USE_STATIC_LIBS)
+        set(OPENSSL_USE_STATIC_LIBS ON)
+        set(OPENSSL_MSVC_STATIC_RT ON)
+    else ()
+        set(OPENSSL_USE_STATIC_LIBS OFF)
+        set(OPENSSL_MSVC_STATIC_RT OFF)
+    endif ()
 endif ()
 
+# Additional search paths for OpenSSL
 if (WIN32)
     set(OPENSSL_ROOT_DIR
-        ${OPENSSL_ROOT_DIR}
-        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}
-        ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows-static
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/openssl
-        $ENV{OPENSSL_ROOT_DIR}
+            ${OPENSSL_ROOT_DIR}
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}
+            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/${VCPKG_TARGET_TRIPLET}
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/openssl
+            $ENV{OPENSSL_ROOT_DIR}
     )
 endif ()
 
@@ -58,9 +76,13 @@ endif ()
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     set(BOOST_ROOT ${CMAKE_PREFIX_PATH})
     set(Boost_NO_SYSTEM_PATHS ON)
-    set(Boost_USE_STATIC_LIBS ON)
+    set(Boost_USE_STATIC_LIBS ${USE_STATIC_LIBS})
     set(Boost_USE_MULTITHREADED ON)
-    set(Boost_USE_STATIC_RUNTIME ON)
+    if (USE_STATIC_LIBS)
+        set(Boost_USE_STATIC_RUNTIME ON)
+    else ()
+        set(Boost_USE_STATIC_RUNTIME OFF)
+    endif ()
 endif ()
 
 find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options date_time regex random)
@@ -81,10 +103,18 @@ find_package(ZLIB REQUIRED)
 
 # Platform-specific optimization flags
 if (MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MT")
-    set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MTd")
+    if (USE_STATIC_LIBS)
+        set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MT")
+        set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MTd")
+    else ()
+        set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
+        set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
+    endif ()
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT /NODEFAULTLIB:MSVCRTD LIBCMT.lib libcpmt.lib")
+    # Only add LIBCMT for static builds
+    if (USE_STATIC_LIBS)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT /NODEFAULTLIB:MSVCRTD")
+    endif ()
 else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
@@ -101,13 +131,13 @@ set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 find_package(nlohmann_json 3.2.0 QUIET)
 if (NOT nlohmann_json_FOUND)
     find_path(NLOHMANN_JSON_INCLUDE_DIR
-        NAMES nlohmann/json.hpp
-        PATHS
-        /usr/include
-        /usr/local/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/json/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows-static/include
+            NAMES nlohmann/json.hpp
+            PATHS
+            /usr/include
+            /usr/local/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/json/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/${VCPKG_TARGET_TRIPLET}/include
     )
     if (NOT NLOHMANN_JSON_INCLUDE_DIR)
         message(FATAL_ERROR "nlohmann/json not found. Please install it (e.g., 'apt install nlohmann-json3-dev' or via vcpkg)")
@@ -127,25 +157,25 @@ if (GPU_BACKEND STREQUAL "HIP")
 
     if (NOT HIP_ARCH)
         set(HIP_ARCH_LIST
-            "gfx900"    # Vega 10
-            "gfx906"    # Vega 20
-            "gfx908"    # MI100
-            "gfx90a"    # MI200
-            "gfx940"    # MI300
-            "gfx1010"   # RDNA1 - Navi 10
-            "gfx1012"   # RDNA1 - Navi 14
-            "gfx1030"   # RDNA2 - Navi 21
-            "gfx1031"   # RDNA2 - Navi 22
-            "gfx1032"   # RDNA2 - Navi 23
-            "gfx1034"   # RDNA2 - Navi 24
-            "gfx1035"   # RDNA2 - Rembrandt
-            "gfx1036"   # RDNA2 - Raphael
-            "gfx1100"   # RDNA3 - Navi 31
-            "gfx1101"   # RDNA3 - Navi 32
-            "gfx1102"   # RDNA3 - Navi 33
-            "gfx1103"   # RDNA3 - Phoenix
-            "gfx1200"   # RDNA4 - Navi 44 (RX 9070 XT)
-            "gfx1201"   # RDNA4 - Navi 48 (RX 9070)
+                "gfx900"    # Vega 10
+                "gfx906"    # Vega 20
+                "gfx908"    # MI100
+                "gfx90a"    # MI200
+                "gfx940"    # MI300
+                "gfx1010"   # RDNA1 - Navi 10
+                "gfx1012"   # RDNA1 - Navi 14
+                "gfx1030"   # RDNA2 - Navi 21
+                "gfx1031"   # RDNA2 - Navi 22
+                "gfx1032"   # RDNA2 - Navi 23
+                "gfx1034"   # RDNA2 - Navi 24
+                "gfx1035"   # RDNA2 - Rembrandt
+                "gfx1036"   # RDNA2 - Raphael
+                "gfx1100"   # RDNA3 - Navi 31
+                "gfx1101"   # RDNA3 - Navi 32
+                "gfx1102"   # RDNA3 - Navi 33
+                "gfx1103"   # RDNA3 - Phoenix
+                "gfx1200"   # RDNA4 - Navi 44 (RX 9070 XT)
+                "gfx1201"   # RDNA4 - Navi 48 (RX 9070)
         )
         string(REPLACE ";" "," HIP_ARCH "${HIP_ARCH_LIST}")
     endif ()
@@ -167,25 +197,25 @@ if (GPU_BACKEND STREQUAL "HIP")
     endif ()
 
     add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
-        COMMAND "${HIPCC_BINARY}"
-        ARGS ${HIPCC_FLAGS}
-             ${HIP_OFFLOAD_ARCH_FLAGS}
-             -I${INCLUDE_DIR} -I${MINER_DIR} -I${OPENSSL_INCLUDE_DIR}
-             -DUSE_HIP -D__HIP_PLATFORM_AMD__
-             -c ${MINER_DIR}/sha1_kernel_amd.hip.cpp
-             -o "${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o"
-        DEPENDS ${MINER_DIR}/sha1_kernel_amd.hip.cpp
-        COMMENT "Compiling HIP kernel for architectures: ${HIP_ARCH}"
-        VERBATIM
+            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
+            COMMAND "${HIPCC_BINARY}"
+            ARGS ${HIPCC_FLAGS}
+            ${HIP_OFFLOAD_ARCH_FLAGS}
+            -I${INCLUDE_DIR} -I${MINER_DIR} -I${OPENSSL_INCLUDE_DIR}
+            -DUSE_HIP -D__HIP_PLATFORM_AMD__
+            -c ${MINER_DIR}/sha1_kernel_amd.hip.cpp
+            -o "${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o"
+            DEPENDS ${MINER_DIR}/sha1_kernel_amd.hip.cpp
+            COMMENT "Compiling HIP kernel for architectures: ${HIP_ARCH}"
+            VERBATIM
     )
 
     add_custom_target(hip_kernel_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o)
 
     set(GPU_INCLUDES ${ROCM_PATH}/include)
     set(GPU_LIBRARIES
-        ${ROCM_PATH}/lib/amdhip64.lib
-        ${ROCM_PATH}/lib/hiprtc.lib
+            ${ROCM_PATH}/lib/amdhip64.lib
+            ${ROCM_PATH}/lib/hiprtc.lib
     )
     if (EXISTS ${ROCM_PATH}/lib/rocm_smi64.lib)
         list(APPEND GPU_LIBRARIES ${ROCM_PATH}/lib/rocm_smi64.lib)
@@ -193,10 +223,6 @@ if (GPU_BACKEND STREQUAL "HIP")
     endif ()
     set(GPU_DEFINES -DUSE_HIP -D__HIP_PLATFORM_AMD__)
     set(KERNEL_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o")
-
-    if (WIN32)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT /NODEFAULTLIB:MSVCRTD LIBCMT.lib libcpmt.lib")
-    endif ()
 
     message(STATUS "Building with HIP/ROCm for AMD GPUs")
     message(STATUS "  ROCm path: ${ROCM_PATH}")
@@ -220,17 +246,17 @@ else ()
 
     add_library(gpu_kernel STATIC ${MINER_DIR}/sha1_kernel.cu)
     set_target_properties(gpu_kernel PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-        POSITION_INDEPENDENT_CODE ON
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+            POSITION_INDEPENDENT_CODE ON
     )
     target_include_directories(gpu_kernel PRIVATE ${INCLUDE_DIR} ${MINER_DIR} ${OPENSSL_INCLUDE_DIR})
 
     target_compile_options(gpu_kernel PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
+            $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
     )
 
     set(GPU_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
@@ -254,97 +280,105 @@ endif ()
 
 # Create main executable
 add_executable(sha1_miner
-    ${SRC_DIR}/main.cpp
-    ${SRC_DIR}/mining_system.cpp
-    ${SRC_DIR}/multi_gpu_manager.cpp
-    ${SRC_DIR}/globals.cpp
-    ${NET_DIR}/pool_client.cpp
-    ${NET_DIR}/pool_integration.cpp
-    ${POOL_SOURCES}
-    ${MINER_DIR}/kernel_launcher.cpp
+        ${SRC_DIR}/main.cpp
+        ${SRC_DIR}/mining_system.cpp
+        ${SRC_DIR}/multi_gpu_manager.cpp
+        ${SRC_DIR}/globals.cpp
+        ${NET_DIR}/pool_client.cpp
+        ${NET_DIR}/pool_integration.cpp
+        ${POOL_SOURCES}
+        ${MINER_DIR}/kernel_launcher.cpp
 )
 
 set_target_properties(sha1_miner PROPERTIES
-    LINKER_LANGUAGE CXX
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        LINKER_LANGUAGE CXX
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_include_directories(sha1_miner PRIVATE
-    ${INCLUDE_DIR}
-    ${MINER_DIR}
-    ${NET_DIR}
-    ${GPU_INCLUDES}
-    ${Boost_INCLUDE_DIRS}
-    ${ZLIB_INCLUDE_DIRS}
-    ${OPENSSL_INCLUDE_DIR}
+        ${INCLUDE_DIR}
+        ${MINER_DIR}
+        ${NET_DIR}
+        ${GPU_INCLUDES}
+        ${Boost_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS}
+        ${OPENSSL_INCLUDE_DIR}
 )
 
 if (NLOHMANN_JSON_INCLUDE_DIR)
     target_include_directories(sha1_miner PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
 endif ()
 
-# Force static runtime for sha1_miner
+# Force runtime library to match vcpkg build
 if (MSVC)
-    target_compile_options(sha1_miner PRIVATE /MT)
+    if (USE_STATIC_LIBS)
+        target_compile_options(sha1_miner PRIVATE /MT$<$<CONFIG:Debug>:d>)
+    else ()
+        target_compile_options(sha1_miner PRIVATE /MD$<$<CONFIG:Debug>:d>)
+    endif ()
 endif ()
 
 target_compile_definitions(sha1_miner PRIVATE
-    ${GPU_DEFINES}
-    BOOST_BIND_GLOBAL_PLACEHOLDERS
-    BOOST_BEAST_USE_STD_STRING_VIEW
-    BOOST_ALL_NO_LIB
+        ${GPU_DEFINES}
+        BOOST_BIND_GLOBAL_PLACEHOLDERS
+        BOOST_BEAST_USE_STD_STRING_VIEW
+        BOOST_ALL_NO_LIB
 )
 
 if (WIN32)
     target_compile_definitions(sha1_miner PRIVATE
-        _WIN32_WINNT=0x0A00
-        WIN32_LEAN_AND_MEAN
+            _WIN32_WINNT=0x0A00
+            WIN32_LEAN_AND_MEAN
     )
 endif ()
 
 if (NOT MSVC)
     target_compile_options(sha1_miner PRIVATE
-        $<$<CONFIG:Release>:-O3 -march=native -mtune=native -ffast-math -funroll-loops>
-        $<$<CONFIG:Debug>:-O0 -g>
+            $<$<CONFIG:Release>:-O3 -march=native -mtune=native -ffast-math -funroll-loops>
+            $<$<CONFIG:Debug>:-O0 -g>
     )
 endif ()
 
 if (GPU_BACKEND STREQUAL "HIP")
     add_dependencies(sha1_miner hip_kernel_target)
     target_link_libraries(sha1_miner PRIVATE
-        ${KERNEL_OBJECT}
-        ${GPU_LIBRARIES}
-        ${Boost_LIBRARIES}
-        ZLIB::ZLIB
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-        LIBCMT.lib
-        libcpmt.lib
+            ${KERNEL_OBJECT}
+            ${GPU_LIBRARIES}
+            ${Boost_LIBRARIES}
+            ZLIB::ZLIB
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            Threads::Threads
     )
+    if (USE_STATIC_LIBS AND WIN32)
+        target_link_libraries(sha1_miner PRIVATE
+                LIBCMT.lib
+                libcpmt.lib
+        )
+    endif ()
 else ()
     target_link_libraries(sha1_miner PRIVATE
-        ${GPU_LIBRARIES}
-        ${Boost_LIBRARIES}
-        ZLIB::ZLIB
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
+            ${GPU_LIBRARIES}
+            ${Boost_LIBRARIES}
+            ZLIB::ZLIB
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            Threads::Threads
     )
 
     if (WIN32)
         target_link_libraries(sha1_miner PRIVATE
-            synchronization.lib
-            ws2_32.lib
-            iphlpapi.lib
-            userenv.lib
-            psapi.lib
+                synchronization.lib
+                ws2_32.lib
+                iphlpapi.lib
+                userenv.lib
+                psapi.lib
         )
     endif ()
 
     set_target_properties(sha1_miner PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
 endif ()
 
@@ -376,6 +410,7 @@ message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  GPU Backend: ${GPU_BACKEND}")
 message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
+message(STATUS "  Library linkage: ${USE_STATIC_LIBS}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
