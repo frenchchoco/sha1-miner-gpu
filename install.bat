@@ -42,11 +42,17 @@ for /f "tokens=*" %%i in ('powershell -Command "Get-WmiObject -Class Win32_Video
         set "GPU_TYPE=NVIDIA"
         echo %SUCCESS% NVIDIA GPU detected.
     )
-    echo %%i | findstr /i "AMD Radeon" >nul
+    echo %%i | findstr /i "AMD" >nul
     if not errorlevel 1 (
         set "HAS_AMD=1"
         set "GPU_TYPE=AMD"
         echo %SUCCESS% AMD GPU detected.
+    )
+    echo %%i | findstr /i "Radeon" >nul
+    if not errorlevel 1 (
+        set "HAS_AMD=1"
+        set "GPU_TYPE=AMD"
+        echo %SUCCESS% AMD Radeon GPU detected.
     )
 )
 
