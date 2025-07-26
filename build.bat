@@ -1,8 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Build script for SHA1 Miner CMake project
-:: Supports both NVIDIA/CUDA and AMD/HIP builds
+:: Build script for SHA1 Miner GPU project
+:: Supports AMD/HIP builds
+
+:: Initialize GPU backend
+if "!GPU_BACKEND!"=="" set GPU_BACKEND=AMD
 
 :MAIN_MENU
 cls
@@ -22,13 +25,13 @@ echo 7. Exit
 echo.
 set /p choice="Select option (1-7): "
 
-if "%choice%"=="1" goto CONFIGURE_MENU
-if "%choice%"=="2" goto BUILD_MENU
-if "%choice%"=="3" goto TEST_MENU
-if "%choice%"=="4" goto CLEAN_MENU
-if "%choice%"=="5" goto SETUP_VCPKG
-if "%choice%"=="6" goto SWITCH_BACKEND
-if "%choice%"=="7" goto EXIT
+if "!choice!"=="1" goto CONFIGURE
+if "!choice!"=="2" goto BUILD
+if "!choice!"=="3" goto TEST
+if "!choice!"=="4" goto CLEAN
+if "!choice!"=="5" goto SETUP_VCPKG
+if "!choice!"=="6" goto SWITCH_BACKEND
+if "!choice!"=="7" goto EXIT
 goto MAIN_MENU
 
 :SWITCH_BACKEND
@@ -45,13 +48,13 @@ echo 3. Back to Main Menu
 echo.
 set /p backend_choice="Select GPU backend (1-3): "
 
-if "%backend_choice%"=="1" (
+if "!backend_choice!"=="1" (
     set GPU_BACKEND=NVIDIA
     echo GPU backend set to NVIDIA/CUDA
-) else if "%backend_choice%"=="2" (
+) else if "!backend_choice!"=="2" (
     set GPU_BACKEND=AMD
     echo GPU backend set to AMD/HIP
-) else if "%backend_choice%"=="3" (
+) else if "!backend_choice!"=="3" (
     goto MAIN_MENU
 ) else (
     echo Invalid selection!
@@ -59,7 +62,7 @@ if "%backend_choice%"=="1" (
 pause
 goto MAIN_MENU
 
-:CONFIGURE_MENU
+:CONFIGURE
 cls
 echo =====================================
 echo   Configure Presets
@@ -80,16 +83,67 @@ if "%GPU_BACKEND%"=="AMD" (
     if "!config_choice!"=="1" (
         set PRESET=windows-hip-release
         set BUILD_DIR=build\hip-release
+        set CMAKE_BUILD_TYPE=Release
     ) else if "!config_choice!"=="2" (
         set PRESET=windows-hip-debug
         set BUILD_DIR=build\hip-debug
+        set CMAKE_BUILD_TYPE=Debug
     ) else if "!config_choice!"=="3" (
         goto MAIN_MENU
     ) else (
         echo Invalid selection!
         pause
-        goto CONFIGURE_MENU
+        goto CONFIGURE
     )
+
+    echo.
+    echo Configuring with preset: %PRESET%
+    echo.
+
+    :: Check AMD dependencies
+    call :CHECK_AMD_TOOLS
+    if errorlevel 1 (
+        echo Configuration aborted due to missing AMD/ROCm tools.
+        pause
+        goto MAIN_MENU
+    )
+
+    :: Check if vcpkg exists
+    if not exist "vcpkg\vcpkg.exe" (
+        echo WARNING: vcpkg not found! You may need to run Setup vcpkg first.
+        echo.
+        set /p continue_anyway="Continue anyway? (y/n): "
+        if /i "!continue_anyway!" neq "y" (
+            goto MAIN_MENU
+        )
+    )
+
+    :: Create AMD/HIP configuration
+    echo Creating AMD/HIP configuration...
+    echo Build directory: %BUILD_DIR%
+
+    :: Create build directory if it doesn't exist
+    if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+
+    :: Set vcpkg paths
+    if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
+        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+    ) else (
+        echo WARNING: vcpkg toolchain not found!
+        set VCPKG_CMAKE=
+    )
+
+    cmake -B %BUILD_DIR% -G "Ninja" -DCMAKE_BUILD_TYPE=%CMAKE_BUILD_TYPE% -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH="%ROCM_PATH%" %VCPKG_CMAKE%
+if errorlevel 1 (
+    echo.
+    echo Configuration failed!
+    pause
+) else (
+    echo.
+    echo Configuration successful!
+    pause
+)
+goto MAIN_MENU
 ) else (
     echo NVIDIA/CUDA Build Options:
     echo 1. Windows Release (Ninja + CUDA 12.9)
@@ -117,61 +171,16 @@ if "%GPU_BACKEND%"=="AMD" (
     ) else (
         echo Invalid selection!
         pause
-        goto CONFIGURE_MENU
+        goto CONFIGURE
     )
-)
 
-echo.
-echo Configuring with preset: %PRESET%
-echo.
-
-:: Check dependencies based on backend
-if "%GPU_BACKEND%"=="AMD" (
-    call :CHECK_AMD_TOOLS
-    if errorlevel 1 (
-        echo Configuration aborted due to missing AMD/ROCm tools.
-        pause
-        goto MAIN_MENU
-    )
-) else (
-    call :CHECK_NVIDIA_TOOLS
-)
-
-:: Check if vcpkg exists
-if not exist "vcpkg\vcpkg.exe" (
-    echo WARNING: vcpkg not found! You may need to run Setup vcpkg first.
     echo.
-    set /p continue_anyway="Continue anyway? (y/n): "
-    if /i "!continue_anyway!" neq "y" (
-        goto MAIN_MENU
-    )
-)
+    echo Configuring with preset: %PRESET%
+    echo.
 
-:: Create custom AMD presets if they don't exist in CMakePresets.json
-if "%GPU_BACKEND%"=="AMD" (
-    echo Creating AMD/HIP configuration...
-    echo Build directory: %BUILD_DIR%
+    :: Check NVIDIA dependencies
+    call :CHECK_NVIDIA_TOOLS
 
-    :: Create build directory if it doesn't exist
-    if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-
-    :: Configure with HIP
-    if "%PRESET%"=="windows-hip-release" (
-        set CMAKE_BUILD_TYPE=Release
-    ) else (
-        set CMAKE_BUILD_TYPE=Debug
-    )
-
-    :: Set vcpkg paths
-    if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
-        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
-    ) else (
-        echo WARNING: vcpkg toolchain not found, building without vcpkg
-        set VCPKG_CMAKE=
-    )
-
-    cmake -B %BUILD_DIR% -G "Ninja" -DCMAKE_BUILD_TYPE=%CMAKE_BUILD_TYPE% -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH=%ROCM_PATH% -DHIP_ARCH=%HIP_ARCHITECTURES% %VCPKG_CMAKE%
-) else (
     :: Run CMake configure for NVIDIA
     cmake --preset %PRESET%
 )
@@ -180,19 +189,18 @@ if errorlevel 1 (
     echo.
     echo Configuration failed!
     pause
-    goto CONFIGURE_MENU
 ) else (
     echo.
     echo Configuration successful!
     pause
-    goto MAIN_MENU
 )
+goto MAIN_MENU
 
-:BUILD_MENU
+:BUILD
 cls
-echo =====================================
+echo ==============================
 echo   Build Presets
-echo =====================================
+echo ==============================
 echo.
 
 :: Setup Visual Studio environment for builds
@@ -217,7 +225,7 @@ if "%GPU_BACKEND%"=="AMD" (
     ) else (
         echo Invalid selection!
         pause
-        goto BUILD_MENU
+        goto BUILD
     )
 
     echo.
@@ -230,10 +238,10 @@ if "%GPU_BACKEND%"=="AMD" (
         echo Please configure the project first - Option 1 in main menu.
         echo.
         echo Steps:
-        echo 1. Go back to main menu
-        echo 2. Select "1. Configure Project"
-        echo 3. Choose AMD configuration - Release or Debug
-        echo 4. Then come back here to build
+            echo 1. Go back to main menu
+            echo 2. Select "1. Configure Project"
+            echo 3. Choose AMD configuration - Release or Debug
+            echo 4. Then come back here to build
         echo.
         pause
         goto MAIN_MENU
@@ -248,6 +256,16 @@ if "%GPU_BACKEND%"=="AMD" (
     )
 
     cmake --build %BUILD_DIR% -j 12
+if errorlevel 1 (
+    echo.
+    echo Build failed!
+    pause
+) else (
+    echo.
+    echo Build successful!
+    pause
+)
+goto MAIN_MENU
 ) else (
     echo NVIDIA/CUDA Build Options:
     echo 1. Windows Release (Ninja)
@@ -271,7 +289,7 @@ if "%GPU_BACKEND%"=="AMD" (
     ) else (
         echo Invalid selection!
         pause
-        goto BUILD_MENU
+        goto BUILD
     )
 
     echo.
@@ -283,15 +301,14 @@ if errorlevel 1 (
     echo.
     echo Build failed!
     pause
-    goto BUILD_MENU
 ) else (
     echo.
     echo Build successful!
     pause
-    goto MAIN_MENU
 )
+goto MAIN_MENU
 
-:TEST_MENU
+:TEST
 cls
 echo =====================================
 echo   Test Presets
@@ -303,7 +320,7 @@ echo 3. Back to Main Menu
 echo.
 set /p test_choice="Select test option (1-3): "
 
-if "%test_choice%"=="1" (
+if "!test_choice!"=="1" (
     echo.
     if "%GPU_BACKEND%"=="AMD" (
         echo Running tests for AMD/HIP build...
@@ -324,21 +341,21 @@ if "%test_choice%"=="1" (
     )
     pause
     goto MAIN_MENU
-) else if "%test_choice%"=="2" (
+) else if "!test_choice!"=="2" (
     echo.
     set /p test_cmd="Enter test command: "
     !test_cmd!
     pause
     goto MAIN_MENU
-) else if "%test_choice%"=="3" (
+) else if "!test_choice!"=="3" (
     goto MAIN_MENU
 ) else (
     echo Invalid selection!
     pause
-    goto TEST_MENU
+    goto TEST
 )
 
-:CLEAN_MENU
+:CLEAN
 cls
 echo =====================================
 echo   Clean Build Directories
@@ -355,7 +372,7 @@ echo 8. Back to Main Menu
 echo.
 set /p clean_choice="Select directory to clean (1-8): "
 
-if "%clean_choice%"=="1" (
+if "!clean_choice!"=="1" (
     if exist "build\release" (
         echo Cleaning build\release...
         rmdir /s /q "build\release"
@@ -363,7 +380,7 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="2" (
+) else if "!clean_choice!"=="2" (
     if exist "build\debug" (
         echo Cleaning build\debug...
         rmdir /s /q "build\debug"
@@ -371,7 +388,7 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="3" (
+) else if "!clean_choice!"=="3" (
     if exist "build\vs2022-release" (
         echo Cleaning build\vs2022-release...
         rmdir /s /q "build\vs2022-release"
@@ -379,7 +396,7 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="4" (
+) else if "!clean_choice!"=="4" (
     if exist "build\vs2022-debug" (
         echo Cleaning build\vs2022-debug...
         rmdir /s /q "build\vs2022-debug"
@@ -387,7 +404,7 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="5" (
+) else if "!clean_choice!"=="5" (
     if exist "build\hip-release" (
         echo Cleaning build\hip-release...
         rmdir /s /q "build\hip-release"
@@ -395,7 +412,7 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="6" (
+) else if "!clean_choice!"=="6" (
     if exist "build\hip-debug" (
         echo Cleaning build\hip-debug...
         rmdir /s /q "build\hip-debug"
@@ -403,11 +420,11 @@ if "%clean_choice%"=="1" (
     ) else (
         echo Directory not found!
     )
-) else if "%clean_choice%"=="7" (
+) else if "!clean_choice!"=="7" (
     echo Cleaning all build directories...
     if exist "build" rmdir /s /q "build"
     echo Done!
-) else if "%clean_choice%"=="8" (
+) else if "!clean_choice!"=="8" (
     goto MAIN_MENU
 ) else (
     echo Invalid selection!
@@ -484,8 +501,8 @@ exit /b 0
 :: Set default ROCm path if not set
 if "%ROCM_PATH%"=="" (
     :: Check common Windows ROCm installation paths
-    if exist "C:\Program Files\AMD\ROCm" (
-        set ROCM_PATH=C:\Program Files\AMD\ROCm
+    if exist "C:\Program Files\AMD\ROCm\6.2" (
+        set ROCM_PATH=C:\Program Files\AMD\ROCm\6.2
     ) else if exist "C:\ROCm" (
         set ROCM_PATH=C:\ROCm
     ) else (
@@ -499,15 +516,7 @@ if "%ROCM_PATH%"=="" (
     )
 )
 
-:: Set default HIP architectures if not set
-if "%HIP_ARCHITECTURES%"=="" (
-    :: Common AMD GPU architectures
-    set HIP_ARCHITECTURES=gfx1030,gfx1031,gfx1032,gfx1100,gfx1101,gfx1102,gfx1200,gfx1201
-    echo Using default HIP architectures: %HIP_ARCHITECTURES%
-)
-
 echo Found ROCm at: %ROCM_PATH%
-echo HIP architectures: %HIP_ARCHITECTURES%
 echo.
 exit /b 0
 
@@ -568,9 +577,6 @@ echo Please install Visual Studio 2022 with C++ development tools
 echo Or run this script from a "Developer Command Prompt for VS 2022"
 pause
 exit /b 1
-
-:: Initialize GPU backend
-if "%GPU_BACKEND%"=="" set GPU_BACKEND=NVIDIA
 
 :: Check for required tools at startup
 where cmake >nul 2>nul
