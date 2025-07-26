@@ -3,6 +3,22 @@ REM SHA-1 OP_NET Miner - Windows Dependencies Installer
 REM This script installs dependencies with compatible versions
 REM Now supports both NVIDIA and AMD GPUs
 
+REM Check for admin rights
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo This script requires administrator privileges.
+    echo Restarting as administrator...
+    echo.
+
+    REM Create a temporary VBScript to elevate
+    echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\getadmin.vbs"
+    echo UAC.ShellExecute "%~s0", "%*", "", "runas", 1 >> "%temp%\getadmin.vbs"
+
+    "%temp%\getadmin.vbs"
+    del "%temp%\getadmin.vbs"
+    exit /b
+)
+
 setlocal enabledelayedexpansion
 
 REM Set colors
@@ -23,6 +39,7 @@ cls
 echo =====================================
 echo SHA-1 Miner - Dependencies Installer
 echo =====================================
+echo Running as Administrator
 echo.
 echo Working directory: %INSTALL_DIR%
 echo.
@@ -32,7 +49,7 @@ set "GPU_TYPE=NONE"
 set "HAS_NVIDIA=0"
 set "HAS_AMD=0"
 
-REM Check for GPUs using PowerShell (faster and more reliable)
+REM Check for GPUs using PowerShell
 echo %INFO% Detecting installed GPUs...
 for /f "tokens=*" %%i in ('powershell -Command "Get-WmiObject -Class Win32_VideoController | Select-Object -ExpandProperty Name" 2^>nul') do (
     echo %INFO% Found GPU: %%i
@@ -80,7 +97,7 @@ if "%HAS_AMD%"=="1" (
     REM Check for AMD ROCm/HIP SDK
     echo %INFO% Checking for AMD HIP SDK installation...
     set "HIP_FOUND=0"
-    
+
     REM Check common HIP SDK installation paths
     if exist "%ProgramFiles%\AMD\ROCm" (
         set "HIP_PATH=%ProgramFiles%\AMD\ROCm"
@@ -98,7 +115,7 @@ if "%HAS_AMD%"=="1" (
         set "HIP_PATH=C:\hip"
         set "HIP_FOUND=1"
     )
-    
+
     if "%HIP_FOUND%"=="1" (
         echo %SUCCESS% AMD HIP SDK found at: !HIP_PATH!
         setx HIP_PATH "!HIP_PATH!" >nul 2>&1
@@ -106,10 +123,7 @@ if "%HAS_AMD%"=="1" (
     ) else (
         echo %WARNING% AMD HIP SDK not found. For AMD GPU support, install:
         echo           AMD ROCm/HIP SDK: https://rocm.docs.amd.com/en/latest/deploy/windows/index.html
-        echo           OR use Windows Subsystem for Linux (WSL2) with ROCm
         echo.
-        echo %INFO% Note: Full AMD GPU support is better on Linux.
-        echo        Consider using WSL2 with Ubuntu and ROCm for best performance.
     )
 )
 echo.
@@ -255,7 +269,7 @@ echo Dependencies Installation Complete!
 echo =====================================
 echo.
 echo Installed packages:
-echo   - OpenSSL (SSL/TLS support)
+echo   - OpenSSL - SSL/TLS support
 echo   - Boost 1.88 libraries including Beast:
 echo     * boost-system
 echo     * boost-thread
@@ -267,8 +281,8 @@ echo     * boost-atomic
 echo     * boost-date-time
 echo     * boost-regex
 echo     * boost-random
-echo   - nlohmann-json (JSON parsing)
-echo   - zlib (compression)
+echo   - nlohmann-json - JSON parsing
+echo   - zlib - compression
 echo.
 echo GPU Support Status:
 if "%HAS_NVIDIA%"=="1" (
@@ -288,7 +302,7 @@ if "%HAS_AMD%"=="1" (
         echo.
         echo   %INFO% For AMD GPU support on Windows:
         echo         1. Install AMD HIP SDK from AMD website
-        echo         2. OR use WSL2 with Ubuntu and ROCm (recommended)
+        echo         2. HIP SDK provides ROCm support for Windows
     )
 )
 if "%GPU_TYPE%"=="NONE" (
@@ -304,7 +318,7 @@ if "%HAS_NVIDIA%"=="1" if "%CUDA_PATH%"=="" (
     echo      - Install CUDA Toolkit
 )
 if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
-    echo      - Install AMD HIP SDK or use WSL2 with ROCm
+    echo      - Install AMD HIP SDK
 )
 echo   2. Configure the project:
 if "%HAS_NVIDIA%"=="1" (
@@ -312,7 +326,6 @@ if "%HAS_NVIDIA%"=="1" (
 )
 if "%HAS_AMD%"=="1" (
     echo      cmake --preset windows-ninja-release -DUSE_HIP=ON
-    echo      Note: Full AMD support may require WSL2 with Linux
 )
 echo   3. Build the project:
 echo      cmake --build --preset windows-release
@@ -320,17 +333,8 @@ echo.
 if "%HAS_AMD%"=="1" if "%HIP_FOUND%"=="0" (
     echo %WARNING% AMD GPU Windows Support Note:
     echo.
-    echo AMD GPU compute support on Windows is limited. For best performance
-    echo and compatibility, consider using:
-    echo.
-    echo Option 1: WSL2 with Ubuntu and ROCm
-    echo   - Install WSL2: wsl --install
-    echo   - Install Ubuntu from Microsoft Store
-    echo   - Follow Linux ROCm installation guide
-    echo.
-    echo Option 2: Native Windows HIP SDK (experimental)
-    echo   - Download from AMD ROCm website
-    echo   - May have limited GPU architecture support
+    echo AMD GPU compute support on Windows requires the HIP SDK.
+    echo Download and install it from the AMD ROCm website.
     echo.
 )
 echo Press any key to exit...
