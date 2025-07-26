@@ -32,29 +32,22 @@ set "GPU_TYPE=NONE"
 set "HAS_NVIDIA=0"
 set "HAS_AMD=0"
 
-REM Check for NVIDIA GPU
-echo %INFO% Checking for NVIDIA GPU...
-wmic path win32_VideoController get name 2>nul | find /i "NVIDIA" >nul
-if not errorlevel 1 (
-    set "HAS_NVIDIA=1"
-    set "GPU_TYPE=NVIDIA"
-    echo %SUCCESS% NVIDIA GPU detected.
-)
-
-REM Check for AMD GPU
-echo %INFO% Checking for AMD GPU...
-wmic path win32_VideoController get name 2>nul | find /i "AMD" >nul
-if not errorlevel 1 (
-    set "HAS_AMD=1"
-    set "GPU_TYPE=AMD"
-    echo %SUCCESS% AMD GPU detected.
-)
-
-wmic path win32_VideoController get name 2>nul | find /i "Radeon" >nul
-if not errorlevel 1 (
-    set "HAS_AMD=1"
-    set "GPU_TYPE=AMD"
-    echo %SUCCESS% AMD Radeon GPU detected.
+REM Check for GPUs using PowerShell (faster and more reliable)
+echo %INFO% Detecting installed GPUs...
+for /f "tokens=*" %%i in ('powershell -Command "Get-WmiObject -Class Win32_VideoController | Select-Object -ExpandProperty Name" 2^>nul') do (
+    echo %INFO% Found GPU: %%i
+    echo %%i | findstr /i "NVIDIA" >nul
+    if not errorlevel 1 (
+        set "HAS_NVIDIA=1"
+        set "GPU_TYPE=NVIDIA"
+        echo %SUCCESS% NVIDIA GPU detected.
+    )
+    echo %%i | findstr /i "AMD Radeon" >nul
+    if not errorlevel 1 (
+        set "HAS_AMD=1"
+        set "GPU_TYPE=AMD"
+        echo %SUCCESS% AMD GPU detected.
+    )
 )
 
 if "%GPU_TYPE%"=="NONE" (
@@ -81,7 +74,7 @@ if "%HAS_AMD%"=="1" (
     REM Check for AMD ROCm/HIP SDK
     echo %INFO% Checking for AMD HIP SDK installation...
     set "HIP_FOUND=0"
-
+    
     REM Check common HIP SDK installation paths
     if exist "%ProgramFiles%\AMD\ROCm" (
         set "HIP_PATH=%ProgramFiles%\AMD\ROCm"
@@ -99,7 +92,7 @@ if "%HAS_AMD%"=="1" (
         set "HIP_PATH=C:\hip"
         set "HIP_FOUND=1"
     )
-
+    
     if "%HIP_FOUND%"=="1" (
         echo %SUCCESS% AMD HIP SDK found at: !HIP_PATH!
         setx HIP_PATH "!HIP_PATH!" >nul 2>&1
