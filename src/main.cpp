@@ -56,8 +56,8 @@ struct MiningConfig {
     std::string message_hex;
 
     // Performance configuration
-    int num_streams = 8;
-    int threads_per_block = 256;
+    int num_streams = 0;
+    int threads_per_block = 0;
     bool auto_tune = true;
 
     // Pool mining configuration
@@ -148,9 +148,9 @@ MiningConfig parse_args(int argc, char *argv[]) {
              "Backup pool URLs for failover")
             ("no-failover", po::bool_switch(), "Disable automatic pool failover")
             // Performance options
-            ("streams", po::value<int>(&config.num_streams)->default_value(4),
+            ("streams", po::value<int>(&config.num_streams)->default_value(0),
              "Number of CUDA streams")
-            ("threads", po::value<int>(&config.threads_per_block)->default_value(256),
+            ("threads", po::value<int>(&config.threads_per_block)->default_value(0),
              "Threads per block")
             ("auto-tune", po::bool_switch(&config.auto_tune),
              "Auto-tune for optimal performance")
@@ -254,116 +254,13 @@ std::vector<uint8_t> generate_secure_random_message() {
     return message;
 }
 
-// Auto-tune mining parameters
-void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
-    LOG_INFO("TUNE", "Auto-tuning mining parameters...");
-
-    gpuDeviceProp props;
-    gpuGetDeviceProperties(&props, device_id);
-
-    // Calculate optimal blocks based on architecture and SM count
-    int blocks_per_sm;
-    int optimal_threads;
-    if (props.major >= 8) {
-        // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
-        blocks_per_sm = 16;
-        optimal_threads = 256;
-    } else if (props.major == 7) {
-        if (props.minor >= 5) {
-            // Turing (RTX 20xx, T4)
-            blocks_per_sm = 8;
-            optimal_threads = 256;
-        } else {
-            // Volta (V100, Titan V)
-            blocks_per_sm = 8;
-            optimal_threads = 256;
-        }
-    } else if (props.major == 6) {
-        // Pascal (GTX 10xx, P100)
-        if (props.minor >= 1) {
-            blocks_per_sm = 8;
-            optimal_threads = 256;
-        } else {
-            blocks_per_sm = 8;
-            optimal_threads = 256;
-        }
-    } else if (props.major == 5) {
-        // Maxwell (GTX 9xx, GTX 750)
-        blocks_per_sm = 8;
-        optimal_threads = 128;
-    } else {
-        // Kepler and older
-        blocks_per_sm = 4;
-        optimal_threads = 128;
-    }
-
-    // Adjust based on register and shared memory limits
-    int max_threads_per_sm = props.maxThreadsPerMultiProcessor;
-    int max_blocks_per_sm = max_threads_per_sm / optimal_threads;
-    if (blocks_per_sm > max_blocks_per_sm) {
-        blocks_per_sm = max_blocks_per_sm;
-    }
-
-    // Set configuration
-    config.blocks_per_stream = props.multiProcessorCount * blocks_per_sm;
-    config.threads_per_block = optimal_threads;
-
-    // For very large GPUs, limit total blocks to avoid scheduling overhead
-    int max_total_blocks = 2048;
-    if (config.blocks_per_stream > max_total_blocks) {
-        config.blocks_per_stream = max_total_blocks;
-    }
-
-    // Number of streams based on GPU class
-    if (props.multiProcessorCount >= 80) {
-        config.num_streams = 16;
-    } else if (props.multiProcessorCount >= 40) {
-        config.num_streams = 8;
-    } else if (props.multiProcessorCount >= 20) {
-        config.num_streams = 4;
-    } else {
-        config.num_streams = 2;
-    }
-
-    // Adjust streams based on available memory
-    size_t free_mem, total_mem;
-    (void) gpuMemGetInfo(&free_mem, &total_mem);
-    size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size +
-                            (config.blocks_per_stream * config.threads_per_block * sizeof(uint32_t) * 5);
-    int max_streams_by_memory = free_mem / (mem_per_stream * 2);
-    if (config.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
-        config.num_streams = max_streams_by_memory;
-    }
-
-    config.result_buffer_size = 512;
-
-    // Ensure we don't exceed device limits
-    if (config.threads_per_block > props.maxThreadsPerBlock) {
-        config.threads_per_block = props.maxThreadsPerBlock;
-    }
-
-    LOG_INFO("TUNE", "Auto-tuned configuration for ", Color::BRIGHT_CYAN, props.name, Color::RESET, ":");
-    LOG_INFO("TUNE", "  Compute Capability: ", props.major, ".", props.minor);
-    LOG_INFO("TUNE", "  SMs: ", props.multiProcessorCount);
-    LOG_INFO("TUNE", "  Blocks per SM: ", blocks_per_sm);
-    LOG_INFO("TUNE", "  Blocks per stream: ", config.blocks_per_stream);
-    LOG_INFO("TUNE", "  Threads per block: ", config.threads_per_block);
-    LOG_INFO("TUNE", "  Number of streams: ", config.num_streams);
-    LOG_INFO("TUNE", "  Total concurrent threads: ",
-             (config.blocks_per_stream * config.threads_per_block * config.num_streams));
-}
-
 // Run comprehensive benchmark
-void run_benchmark(int gpu_id, bool auto_tune) {
+void run_benchmark(int gpu_id) {
     LOG_INFO("BENCH", Color::BRIGHT_YELLOW, "=== SHA-1 Near-Collision Mining Benchmark ===", Color::RESET);
 
     // Initialize mining system with auto-tuned parameters
     MiningSystem::Config sys_config;
     sys_config.device_id = gpu_id;
-
-    if (auto_tune) {
-        auto_tune_parameters(sys_config, gpu_id);
-    }
 
     g_mining_system = std::make_unique<MiningSystem>(sys_config);
     if (!g_mining_system->initialize()) {
@@ -728,9 +625,9 @@ int main(int argc, char *argv[]) {
     if (config.benchmark) {
         if (gpu_ids_to_use.size() > 1) {
             LOG_WARN("MAIN", "Multi-GPU benchmark not yet implemented. Using GPU 0 only.");
-            run_benchmark(gpu_ids_to_use[0], config.auto_tune);
+            run_benchmark(gpu_ids_to_use[0]);
         } else {
-            run_benchmark(gpu_ids_to_use[0], config.auto_tune);
+            run_benchmark(gpu_ids_to_use[0]);
         }
         return 0;
     }
@@ -790,11 +687,14 @@ int main(int argc, char *argv[]) {
         // Single GPU path
         MiningSystem::Config sys_config;
         sys_config.device_id = gpu_ids_to_use[0];
-        sys_config.num_streams = config.num_streams;
-        sys_config.threads_per_block = config.threads_per_block;
 
-        if (config.auto_tune) {
-            auto_tune_parameters(sys_config, gpu_ids_to_use[0]);
+        // Only set values if user specified them (non-zero)
+        if (config.num_streams > 0) {
+            sys_config.num_streams = config.num_streams;
+        }
+
+        if (config.threads_per_block > 0) {
+            sys_config.threads_per_block = config.threads_per_block;
         }
 
         g_mining_system = std::make_unique<MiningSystem>(sys_config);

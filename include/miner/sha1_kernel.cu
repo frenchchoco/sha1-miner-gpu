@@ -51,15 +51,14 @@ __global__ void sha1_mining_kernel_nvidia(
     uint64_t job_version
 ) {
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t lane_id = threadIdx.x & 31;
 
     // Direct nonce calculation
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
     // Load base message using vectorized access
     uint8_t base_msg[32];
-    uint4 *base_msg_vec = (uint4 *) base_msg;
-    const uint4 *base_message_vec = (const uint4 *) base_message;
+    auto *base_msg_vec = reinterpret_cast<uint4 *>(base_msg);
+    const auto *base_message_vec = reinterpret_cast<const uint4 *>(base_message);
     base_msg_vec[0] = base_message_vec[0];
     base_msg_vec[1] = base_message_vec[1];
 
@@ -82,18 +81,18 @@ __global__ void sha1_mining_kernel_nvidia(
 
         // Create message copy with vectorized ops
         uint8_t msg_bytes[32];
-        uint4 *msg_bytes_vec = (uint4 *) msg_bytes;
+        auto *msg_bytes_vec = reinterpret_cast<uint4 *>(msg_bytes);
         msg_bytes_vec[0] = base_msg_vec[0];
         msg_bytes_vec[1] = base_msg_vec[1];
 
         // Apply nonce efficiently
-        uint32_t *msg_words = (uint32_t *) msg_bytes;
+        auto *msg_words = reinterpret_cast<uint32_t *>(msg_bytes);
         msg_words[6] ^= __byte_perm(nonce >> 32, 0, 0x0123);
         msg_words[7] ^= __byte_perm(nonce & 0xFFFFFFFF, 0, 0x0123);
 
         // Convert to big-endian words for SHA-1
         uint32_t W[16];
-        uint32_t *msg_words_local = (uint32_t *) msg_bytes;
+        const auto *msg_words_local = reinterpret_cast<uint32_t *>(msg_bytes);
 #pragma unroll
         for (int j = 0; j < 8; j++) {
             W[j] = __byte_perm(msg_words_local[j], 0, 0x0123);
@@ -184,12 +183,8 @@ __global__ void sha1_mining_kernel_nvidia(
         hash[3] = d + H0[3];
         hash[4] = e + H0[4];
 
-        uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
-
-        if (matching_bits >= difficulty) {
-            // Simple atomic approach for AMD - no vote functions
-            uint32_t idx = atomicAdd(result_count, 1);
-            if (idx < result_capacity) {
+        if (const uint32_t matching_bits = count_leading_zeros_160bit(hash, target); matching_bits >= difficulty) {
+            if (const uint32_t idx = atomicAdd(result_count, 1); idx < result_capacity) {
                 results[idx].nonce = nonce;
                 results[idx].matching_bits = matching_bits;
                 results[idx].difficulty_score = matching_bits;
@@ -202,50 +197,11 @@ __global__ void sha1_mining_kernel_nvidia(
                 printf("Result capacity exceeded: %u >= %u\n", idx, result_capacity);
             }
         }
-
-        // Count matching bits
-        /*uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
-
-        // Check if we found a match
-        if (matching_bits >= difficulty) {
-            // Use warp vote functions for efficient result writing
-            unsigned mask = __ballot_sync(0xffffffff, matching_bits >= difficulty);
-
-            if (mask != 0) {
-                // Count matches before this lane
-                unsigned lane_mask = (1U << lane_id) - 1;
-                unsigned prefix_sum = __popc(mask & lane_mask);
-
-                // First active lane reserves space
-                unsigned base_idx;
-                if (lane_id == __ffs(mask) - 1) {
-                    base_idx = atomicAdd(result_count, __popc(mask));
-                }
-
-                // Broadcast base index
-                base_idx = __shfl_sync(0xffffffff, base_idx, __ffs(mask) - 1);
-
-                // Write result
-                if ((mask >> lane_id) & 1) {
-                    unsigned idx = base_idx + prefix_sum;
-                    if (idx < result_capacity) {
-                        results[idx].nonce = nonce;
-                        results[idx].matching_bits = matching_bits;
-                        results[idx].difficulty_score = matching_bits;
-                        results[idx].job_version = job_version;
-#pragma unroll
-                        for (int j = 0; j < 5; j++) {
-                            results[idx].hash[j] = hash[j];
-                        }
-                    }
-                }
-            }
-        }*/
     }
 
     // Update total nonces processed
     atomicAdd(
-        reinterpret_cast<unsigned long long*>(actual_nonces_processed),
+        reinterpret_cast<unsigned long long *>(actual_nonces_processed),
         static_cast<unsigned long long>(nonces_processed)
     );
 }
