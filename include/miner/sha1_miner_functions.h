@@ -3,9 +3,6 @@
 
 #include "sha1_miner.cuh"
 
-// Mining system initialization and cleanup
-bool init_mining_system(int device_id);
-
 void cleanup_mining_system();
 
 // Mining job creation

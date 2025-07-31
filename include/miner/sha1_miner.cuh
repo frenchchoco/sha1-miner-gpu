@@ -248,8 +248,6 @@ struct DeviceMiningJob {
 extern "C" {
 #endif
 
-bool init_mining_system(int device_id);
-
 MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty);
 
 void cleanup_mining_system();

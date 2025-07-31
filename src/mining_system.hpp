@@ -84,11 +84,11 @@ public:
         // Constructor with default values
         Config()
             : device_id(0)
-              , num_streams(8)
-              , blocks_per_stream(0) // Auto-calculate
-              , threads_per_block(DEFAULT_THREADS_PER_BLOCK)
+              , num_streams(0)
+              , blocks_per_stream(0)
+              , threads_per_block(0)
               , use_pinned_memory(true)
-              , result_buffer_size(MAX_CANDIDATES_PER_BATCH)
+              , result_buffer_size(0)
               , force_generic_kernel(false) {
         }
     };
