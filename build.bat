@@ -130,7 +130,24 @@ if "%GPU_BACKEND%"=="AMD" (
 
     :: Set vcpkg paths
     if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
-        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake
+
+        :: Only set triplet if user hasn't already specified one
+        if not defined VCPKG_TARGET_TRIPLET (
+            :: For AMD/HIP on Windows, we need static triplet due to hipcc limitations
+            if "%GPU_BACKEND%"=="AMD" (
+                set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows-static
+                echo Using static vcpkg triplet for AMD/HIP build (hipcc requirement)
+            ) else (
+                :: For NVIDIA, use dynamic libraries by default
+                set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows
+                echo Using dynamic vcpkg triplet for NVIDIA/CUDA build
+            )
+        ) else (
+            :: User has set VCPKG_TARGET_TRIPLET, respect their choice
+            set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET%
+            echo Using user-specified vcpkg triplet: %VCPKG_TARGET_TRIPLET%
+        )
     ) else (
         echo WARNING: vcpkg toolchain not found!
         set VCPKG_CMAKE=
