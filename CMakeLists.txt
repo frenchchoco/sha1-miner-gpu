@@ -358,10 +358,14 @@ else ()
     find_package(CUDAToolkit REQUIRED)
 
     if (NOT CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90;120")
+        set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90")
         if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.0")
             list(APPEND CMAKE_CUDA_ARCHITECTURES "90a")
         endif ()
+
+        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+            list(APPEND CMAKE_CUDA_ARCHITECTURES "120")
+        endif()
     endif ()
 
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3 -lineinfo")
