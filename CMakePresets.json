@@ -40,7 +40,7 @@
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
@@ -70,7 +70,7 @@
       "binaryDir": "${sourceDir}/build/vs2022-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20"
       }
     },
@@ -99,7 +99,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++",
-        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20"
       }
@@ -127,7 +127,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CUDA_HOST_COMPILER": "clang++"
