@@ -1,7 +1,6 @@
 @echo off
-setlocal enabledelayedexpansion
 chcp 65001 >nul
-verify >nul
+setlocal enabledelayedexpansion
 
 :: Build script for SHA1 Miner GPU project
 :: Optimized for Windows, supporting NVIDIA/CUDA and AMD/HIP builds
@@ -84,10 +83,6 @@ if errorlevel 1 (
     pause
     goto MAIN_MENU
 )
-
-:: Force re-evaluation for debugging
-set "GPU_BACKEND=!GPU_BACKEND!"
-echo DEBUG: GPU_BACKEND at CONFIGURE start: "!GPU_BACKEND!"
 
 if "!GPU_BACKEND!"=="NVIDIA" (
     goto CONFIGURE_NVIDIA_OPTIONS
@@ -272,10 +267,6 @@ if errorlevel 1 (
     goto MAIN_MENU
 )
 
-:: Force re-evaluation for debugging
-set "GPU_BACKEND=!GPU_BACKEND!"
-echo DEBUG: GPU_BACKEND at BUILD start: "!GPU_BACKEND!"
-
 if "!GPU_BACKEND!"=="NVIDIA" (
     goto BUILD_NVIDIA_OPTIONS
 ) else if "!GPU_BACKEND!"=="AMD" (
@@ -337,10 +328,15 @@ if "!GPU_BACKEND!"=="NVIDIA" (
     )
 
     :: Use number of logical processors for parallel build
-    for /f "tokens=*" %%a in ('wmic cpu get NumberOfLogicalProcessors /value ^| find "="') do (
-        for /f "delims== tokens=2" %%b in ("%%a") do set /a NUM_CORES=%%b
+    :: Using %NUMBER_OF_PROCESSORS% environment variable for locale-agnostic CPU core detection
+    set NUM_CORES=%NUMBER_OF_PROCESSORS%
+    if not defined NUM_CORES (
+        set NUM_CORES=4
+        echo WARNING: Could not automatically detect CPU cores.
+        echo Building with a default of !NUM_CORES! parallel jobs.
+    ) else (
+        echo Detected !NUM_CORES! logical processors.
     )
-    if not defined NUM_CORES set NUM_CORES=4 :: Fallback if WMIC fails
 
     echo Building with !NUM_CORES! parallel jobs...
     cmake --build "!BUILD_DIR!" --config !BUILD_CONFIG! --verbose -j !NUM_CORES!
@@ -1036,7 +1032,7 @@ if defined VCVARS_BAT (
     exit /b 1
 )
 
-:: Check for required tools at startup
+:: Check for required tools
 where cmake >nul 2>nul
 if errorlevel 1 (
     echo ERROR: CMake not found in PATH!
@@ -1045,7 +1041,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Removed the general ninja check here as it's now done conditionally based on preset selection.
+where ninja >nul 2>nul
+if errorlevel 1 (
+    echo WARNING: Ninja not found in PATH!
+    echo Ninja builds will not work without it.
+    echo.
+    echo You can install Ninja by:
+    echo 1. Download from https://github.com/ninja-build/ninja/releases
+    echo 2. Or install via winget: winget install Ninja-build.Ninja
+    echo 3. Or install via chocolatey: choco install ninja
+    echo.
+)
 
 :: Display current backend
 echo Current GPU Backend: !GPU_BACKEND!
