@@ -14,7 +14,15 @@ if "%GPU_BACKEND%"=="" set GPU_BACKEND=NVIDIA
 :: set "ROCM_PATH=C:\Program Files\AMD\ROCm\6.2"
 
 :: Manual CUDA path override - uncomment and modify if auto-detection fails
-:: set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2"
+:: set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+
+:: Check for CMakeLists.txt
+if not exist "CMakeLists.txt" (
+    echo ERROR: CMakeLists.txt not found in the current directory!
+    echo Please ensure a valid CMakeLists.txt is present in %CD%.
+    pause
+    exit /b 1
+)
 
 :MAIN_MENU
 cls
@@ -101,185 +109,191 @@ if "!GPU_BACKEND!"=="NVIDIA" (
 )
 
 :CONFIGURE_AMD_OPTIONS
-    echo Entering AMD/HIP configuration options...
-    echo AMD/HIP Build Options:
-    echo 1. Windows AMD Release (HIP/ROCm)
-    echo 2. Windows AMD Debug (HIP/ROCm)
-    echo 3. Back to Main Menu
-    echo.
-    set /p config_choice="Select configuration (1-3): "
+echo Entering AMD/HIP configuration options...
+echo AMD/HIP Build Options:
+echo 1. Windows AMD Release (HIP/ROCm)
+echo 2. Windows AMD Debug (HIP/ROCm)
+echo 3. Back to Main Menu
+echo.
+set /p config_choice="Select configuration (1-3): "
 
-    if "!config_choice!"=="1" (
-        set BUILD_DIR=build\hip-release
-        set CMAKE_BUILD_TYPE=Release
-    ) else if "!config_choice!"=="2" (
-        set BUILD_DIR=build\hip-debug
-        set CMAKE_BUILD_TYPE=Debug
-    ) else if "!config_choice!"=="3" (
-        goto MAIN_MENU
-    ) else (
-        echo Invalid selection!
-        pause
-        goto CONFIGURE_AMD_OPTIONS
-    )
-
-    echo.
-    echo Configuring for AMD/HIP build...
-    echo.
-
-    :: Check AMD dependencies
-    call :CHECK_AMD_TOOLS
-    if errorlevel 1 (
-        echo Configuration aborted due to missing AMD/ROCm tools.
-        pause
-        goto MAIN_MENU
-    )
-
-    :: Check if vcpkg exists
-    if not exist "vcpkg\vcpkg.exe" (
-        echo WARNING: vcpkg not found! You may need to run Setup vcpkg first.
-        echo.
-        set /p continue_anyway="Continue anyway? (y/n): "
-        if /i "!continue_anyway!" neq "y" (
-            goto MAIN_MENU
-        )
-    )
-
-    echo Creating AMD/HIP configuration...
-    echo Build directory: !BUILD_DIR!
-
-    :: Create build directory if it doesn't exist
-    if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
-
-    :: Set vcpkg paths
-    set VCPKG_CMAKE=
-    if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
-        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake
-        if not defined VCPKG_TARGET_TRIPLET (
-            set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows-static
-            echo Using static vcpkg triplet for AMD/HIP build (hipcc requirement)
-        ) else (
-            set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=!VCPKG_TARGET_TRIPLET!
-            echo Using user-specified vcpkg triplet: !VCPKG_TARGET_TRIPLET!
-        )
-    ) else (
-        echo WARNING: vcpkg toolchain not found!
-    )
-
-    :: Properly quote ROCM_PATH for CMake
-    set "QUOTED_ROCM_PATH=!ROCM_PATH!"
-    cmake -B "!BUILD_DIR!" -G "Ninja" -DCMAKE_BUILD_TYPE=!CMAKE_BUILD_TYPE! -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH="!QUOTED_ROCM_PATH!" -DHIP_ARCH="!HIP_ARCHITECTURES!" !VCPKG_CMAKE!
-
-    if errorlevel 1 (
-        echo.
-        echo Configuration failed!
-        pause
-    ) else (
-        echo.
-        echo Configuration successful!
-        pause
-    )
+if "!config_choice!"=="1" (
+    set BUILD_DIR=build\hip-release
+    set CMAKE_BUILD_TYPE=Release
+) else if "!config_choice!"=="2" (
+    set BUILD_DIR=build\hip-debug
+    set CMAKE_BUILD_TYPE=Debug
+) else if "!config_choice!"=="3" (
     goto MAIN_MENU
+) else (
+    echo Invalid selection!
+    pause
+    goto CONFIGURE_AMD_OPTIONS
+)
+
+echo.
+echo Configuring for AMD/HIP build...
+echo.
+
+:: Check AMD dependencies
+call :CHECK_AMD_TOOLS
+if errorlevel 1 (
+    echo Configuration aborted due to missing AMD/ROCm tools.
+    pause
+    goto MAIN_MENU
+)
+
+:: Check if vcpkg exists
+if not exist "vcpkg\vcpkg.exe" (
+    echo WARNING: vcpkg not found! You may need to run Setup vcpkg first.
+    echo.
+    set /p continue_anyway="Continue anyway? (y/n): "
+    if /i "!continue_anyway!" neq "y" (
+        goto MAIN_MENU
+    )
+)
+
+echo Creating AMD/HIP configuration...
+echo Build directory: !BUILD_DIR!
+
+:: Create build directory if it doesn't exist
+if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
+
+:: Set vcpkg paths
+set VCPKG_CMAKE=
+if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
+    set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake
+    if not defined VCPKG_TARGET_TRIPLET (
+        set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        echo Using static vcpkg triplet for AMD/HIP build (hipcc requirement)
+    ) else (
+        set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=!VCPKG_TARGET_TRIPLET!
+        echo Using user-specified vcpkg triplet: !VCPKG_TARGET_TRIPLET!
+    )
+) else (
+    echo WARNING: vcpkg toolchain not found!
+)
+
+:: Properly quote ROCM_PATH for CMake
+set "QUOTED_ROCM_PATH=!ROCM_PATH!"
+cmake -B "!BUILD_DIR!" -G "Ninja" -DCMAKE_BUILD_TYPE=!CMAKE_BUILD_TYPE! -DCMAKE_CXX_STANDARD=20 -DUSE_HIP=ON -DROCM_PATH="!QUOTED_ROCM_PATH!" -DHIP_ARCH="!HIP_ARCHITECTURES!" !VCPKG_CMAKE!
+
+if errorlevel 1 (
+    echo.
+    echo Configuration failed!
+    pause
+) else (
+    echo.
+    echo Configuration successful!
+    pause
+)
+goto MAIN_MENU
 
 :CONFIGURE_NVIDIA_OPTIONS
-    echo Entering NVIDIA/CUDA configuration options...
-    echo NVIDIA/CUDA Build Options:
-    echo 1. Windows Release (Ninja)
-    echo 2. Windows Debug (Ninja)
-    echo 3. Windows Release (Visual Studio 2022)
-    echo 4. Windows Debug (Visual Studio 2022)
-    echo 5. Back to Main Menu
-    echo.
-    set /p config_choice="Select configuration (1-5): "
+echo Entering NVIDIA/CUDA configuration options...
+echo NVIDIA/CUDA Build Options:
+echo 1. Windows Release (Ninja)
+echo 2. Windows Debug (Ninja)
+echo 3. Windows Release (Visual Studio)
+echo 4. Windows Debug (Visual Studio)
+echo 5. Back to Main Menu
+echo.
+set /p config_choice="Select configuration (1-5): "
 
-    set PRESET=
-    set BUILD_DIR=
-    if "!config_choice!"=="1" (
-        set PRESET=windows-ninja-release
-        set BUILD_DIR=build\ninja-release
-    ) else if "!config_choice!"=="2" (
-        set PRESET=windows-ninja-debug
-        set BUILD_DIR=build\ninja-debug
-    ) else if "!config_choice!"=="3" (
-        set PRESET=windows-vs2022-release
-        set BUILD_DIR=build\vs2022-release
-    ) else if "!config_choice!"=="4" (
-        set PRESET=windows-vs2022-debug
-        set BUILD_DIR=build\vs2022-debug
-    ) else if "!config_choice!"=="5" (
-        goto MAIN_MENU
-    ) else (
-        echo Invalid selection!
-        pause
-        goto CONFIGURE_NVIDIA_OPTIONS
-    )
-
-    echo.
-    echo Configuring with preset: !PRESET!
-    echo Build directory: !BUILD_DIR!
-    echo.
-
-    :: Check NVIDIA dependencies
-    call :CHECK_NVIDIA_TOOLS
-    if errorlevel 1 (
-        echo Configuration aborted due to missing NVIDIA/CUDA tools.
-        pause
-        goto MAIN_MENU
-    )
-
-    :: Check for Ninja if a Ninja preset is selected
-    echo !PRESET! | findstr /i "ninja" >nul
-    if not errorlevel 1 (
-        where ninja >nul 2>nul
-        if errorlevel 1 (
-            echo.
-            echo ERROR: Ninja build tool not found in PATH!
-            echo You selected a Ninja preset, but Ninja is required.
-            echo Please install Ninja and add it to your system PATH.
-            echo You can download it from https://github.com/ninja-build/ninja/releases
-            echo or install via winget: 'winget install Ninja-build.Ninja'
-            echo.
-            pause
-            goto MAIN_MENU
-        ) else (
-            echo [✓] Ninja build tool found.
-        )
-    )
-
-    :: Auto-detect CUDA architectures if not set
-    if "!CUDA_ARCHITECTURES!"=="" (
-        call :AUTO_DETECT_CUDA_ARCH
-    )
-    echo CUDA Architectures: !CUDA_ARCHITECTURES!
-
-    :: Set vcpkg paths for NVIDIA (dynamic linking preferred)
-    set VCPKG_CMAKE=
-    if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
-        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake
-        if not defined VCPKG_TARGET_TRIPLET (
-            set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows
-            echo Using dynamic vcpkg triplet for NVIDIA/CUDA build
-        ) else (
-            set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=!VCPKG_TARGET_TRIPLET!
-            echo Using user-specified vcpkg triplet: !VCPKG_TARGET_TRIPLET!
-        )
-    ) else (
-        echo WARNING: vcpkg toolchain not found!
-    )
-
-    :: Run CMake configure for NVIDIA with CUDA architectures
-    cmake --preset !PRESET! -DCUDA_ARCHITECTURES="!CUDA_ARCHITECTURES!" !VCPKG_CMAKE!
-
-    if errorlevel 1 (
-        echo.
-        echo Configuration failed!
-        pause
-    ) else (
-        echo.
-        echo Configuration successful!
-        pause
-    )
+set PRESET=
+set BUILD_DIR=
+if "!config_choice!"=="1" (
+    set PRESET=windows-ninja-release
+    set BUILD_DIR=build\release
+) else if "!config_choice!"=="2" (
+    set PRESET=windows-ninja-debug
+    set BUILD_DIR=build\debug
+) else if "!config_choice!"=="3" (
+    set PRESET=windows-vs2022-release
+    set BUILD_DIR=build\vs2022-release
+) else if "!config_choice!"=="4" (
+    set PRESET=windows-vs2022-debug
+    set BUILD_DIR=build\vs2022-debug
+) else if "!config_choice!"=="5" (
     goto MAIN_MENU
+) else (
+    echo Invalid selection!
+    pause
+    goto CONFIGURE_NVIDIA_OPTIONS
+)
+
+echo.
+echo Configuring with preset: !PRESET!
+echo Build directory: !BUILD_DIR!
+echo.
+
+:: Check NVIDIA dependencies
+call :CHECK_NVIDIA_TOOLS
+if errorlevel 1 (
+    echo Configuration aborted due to missing NVIDIA/CUDA tools.
+    pause
+    goto MAIN_MENU
+)
+
+:: Check for Ninja if a Ninja preset is selected
+echo !PRESET! | findstr /i "windows-ninja-release windows-ninja-debug" >nul
+if not errorlevel 1 (
+    where ninja >nul 2>nul
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Ninja build tool not found in PATH!
+        echo You selected a Ninja preset, but Ninja is required.
+        echo Please install Ninja and add it to your system PATH.
+        echo You can download it from https://github.com/ninja-build/ninja/releases
+        echo or install via winget: 'winget install Ninja-build.Ninja'
+        echo.
+        pause
+        goto MAIN_MENU
+    ) else (
+        echo [?] Ninja build tool found.
+    )
+)
+
+:: Auto-detect CUDA architectures
+if "!CUDA_ARCHITECTURES!"=="" (
+    call :AUTO_DETECT_CUDA_ARCH
+)
+echo CUDA Architectures: !CUDA_ARCHITECTURES!
+
+:: Set vcpkg paths for NVIDIA (dynamic linking preferred)
+set VCPKG_CMAKE=
+if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
+    set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake
+    if not defined VCPKG_TARGET_TRIPLET (
+        set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=x64-windows
+        echo Using dynamic vcpkg triplet for NVIDIA/CUDA build
+    ) else (
+        set VCPKG_CMAKE=!VCPKG_CMAKE! -DVCPKG_TARGET_TRIPLET=!VCPKG_TARGET_TRIPLET!
+        echo Using user-specified vcpkg triplet: !VCPKG_TARGET_TRIPLET!
+    )
+) else (
+    echo WARNING: vcpkg toolchain not found!
+)
+
+:: Check for CMakePresets.json if using presets
+if not exist "CMakePresets.json" (
+    echo WARNING: CMakePresets.json not found! Falling back to manual configuration.
+    if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
+    cmake -B "!BUILD_DIR!" -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_STANDARD=20 -DCUDA_ARCHITECTURES="!CUDA_ARCHITECTURES!" -DUSE_HIP=OFF !VCPKG_CMAKE! -DCMAKE_VERBOSE_MAKEFILE=ON
+) else (
+    cmake --preset !PRESET! -DCUDA_ARCHITECTURES="!CUDA_ARCHITECTURES!" !VCPKG_CMAKE! -DCMAKE_VERBOSE_MAKEFILE=ON
+)
+
+if errorlevel 1 (
+    echo.
+    echo Configuration failed! Check CMake output above for errors.
+    pause
+) else (
+    echo.
+    echo Configuration successful!
+    pause
+)
+goto MAIN_MENU
 
 :BUILD
 cls
@@ -311,163 +325,162 @@ if "!GPU_BACKEND!"=="NVIDIA" (
 )
 
 :BUILD_AMD_OPTIONS
-    echo Entering AMD/HIP build options...
-    echo AMD/HIP Build Options:
-    echo 1. Windows AMD Release
-    echo 2. Windows AMD Debug
-    echo 3. Back to Main Menu
-    echo.
-    set /p build_choice="Select build configuration (1-3): "
+echo Entering AMD/HIP build options...
+echo AMD/HIP Build Options:
+echo 1. Windows AMD Release
+echo 2. Windows AMD Debug
+echo 3. Back to Main Menu
+echo.
+set /p build_choice="Select build configuration (1-3): "
 
-    if "!build_choice!"=="1" (
-        set BUILD_DIR=build\hip-release
-        set BUILD_CONFIG=Release
-    ) else if "!build_choice!"=="2" (
-        set BUILD_DIR=build\hip-debug
-        set BUILD_CONFIG=Debug
-    ) else if "!build_choice!"=="3" (
-        goto MAIN_MENU
-    ) else (
-        echo Invalid selection!
-        pause
-        goto BUILD_AMD_OPTIONS
-    )
-
-    echo.
-    echo Building AMD/HIP configuration...
-    echo Build directory: !BUILD_DIR!
-
-    if not exist "!BUILD_DIR!" (
-        echo.
-        echo ERROR: Build directory !BUILD_DIR! does not exist!
-        echo Please configure the project first - Option 1 in main menu.
-        echo.
-        echo Steps:
-        echo 1. Go back to main menu
-        echo 2. Select "1. Configure Project"
-        echo 3. Choose AMD configuration - Release or Debug
-        echo 4. Then come back here to build
-        echo.
-        pause
-        goto MAIN_MENU
-    )
-
-    if not exist "!BUILD_DIR!\CMakeCache.txt" (
-        echo.
-        echo ERROR: Project not configured in !BUILD_DIR!
-        echo Please configure the project first.
-        pause
-        goto MAIN_MENU
-    )
-
-    :: Use number of logical processors for parallel build
-    :: Use system variable NUMBER_OF_PROCESSORS instead of wmic
-    set "NUM_CORES=%NUMBER_OF_PROCESSORS%"
-    if not defined NUM_CORES set NUM_CORES=4
-
-    echo Building with !NUM_CORES! parallel jobs...
-    cmake --build "!BUILD_DIR!" --config !BUILD_CONFIG! --verbose -j!NUM_CORES!
-
-    if errorlevel 1 (
-        echo.
-        echo Build failed!
-        pause
-    ) else (
-        echo.
-        echo Build successful!
-        pause
-    )
+if "!build_choice!"=="1" (
+    set BUILD_DIR=build\hip-release
+    set BUILD_CONFIG=Release
+) else if "!build_choice!"=="2" (
+    set BUILD_DIR=build\hip-debug
+    set BUILD_CONFIG=Debug
+) else if "!build_choice!"=="3" (
     goto MAIN_MENU
+) else (
+    echo Invalid selection!
+    pause
+    goto BUILD_AMD_OPTIONS
+)
+
+echo.
+echo Building AMD/HIP configuration...
+echo Build directory: !BUILD_DIR!
+
+if not exist "!BUILD_DIR!" (
+    echo.
+    echo ERROR: Build directory !BUILD_DIR! does not exist!
+    echo Please configure the project first - Option 1 in main menu.
+    echo.
+    echo Steps:
+    echo 1. Go back to main menu
+    echo 2. Select "1. Configure Project"
+    echo 3. Choose AMD configuration - Release or Debug
+    echo 4. Then come back here to build
+    echo.
+    pause
+    goto MAIN_MENU
+)
+
+if not exist "!BUILD_DIR!\CMakeCache.txt" (
+    echo.
+    echo ERROR: Project not configured in !BUILD_DIR!
+    echo Please configure the project first.
+    pause
+    goto MAIN_MENU
+)
+
+:: Use number of logical processors for parallel build
+set "NUM_CORES=%NUMBER_OF_PROCESSORS%"
+if not defined NUM_CORES set NUM_CORES=4
+
+echo Building with !NUM_CORES! parallel jobs...
+cmake --build "!BUILD_DIR!" --config !BUILD_CONFIG! --verbose -j!NUM_CORES!
+
+if errorlevel 1 (
+    echo.
+    echo Build failed! Check output above for errors.
+    pause
+) else (
+    echo.
+    echo Build successful!
+    pause
+)
+goto MAIN_MENU
 
 :BUILD_NVIDIA_OPTIONS
-    echo Entering NVIDIA/CUDA build options...
-    echo NVIDIA/CUDA Build Options:
-    echo 1. Windows Release (Ninja)
-    echo 2. Windows Debug (Ninja)
-    echo 3. Windows Release (Visual Studio)
-    echo 4. Windows Debug (Visual Studio)
-    echo 5. Back to Main Menu
-    echo.
-    set /p build_choice="Select build configuration (1-5): "
+echo Entering NVIDIA/CUDA build options...
+echo NVIDIA/CUDA Build Options:
+echo 1. Windows Release (Ninja)
+echo 2. Windows Debug (Ninja)
+echo 3. Windows Release (Visual Studio)
+echo 4. Windows Debug (Visual Studio)
+echo 5. Back to Main Menu
+echo.
+set /p build_choice="Select build configuration (1-5): "
 
-    set BUILD_PRESET=
-    set BUILD_DIR=
-    if "!build_choice!"=="1" (
-        set BUILD_PRESET=windows-ninja-release
-        set BUILD_DIR=build\ninja-release
-    ) else if "!build_choice!"=="2" (
-        set BUILD_PRESET=windows-ninja-debug
-        set BUILD_DIR=build\ninja-debug
-    ) else if "!build_choice!"=="3" (
-        set BUILD_PRESET=windows-vs2022-release
-        set BUILD_DIR=build\vs2022-release
-    ) else if "!build_choice!"=="4" (
-        set BUILD_PRESET=windows-vs2022-debug
-        set BUILD_DIR=build\vs2022-debug
-    ) else if "!build_choice!"=="5" (
-        goto MAIN_MENU
-    ) else (
-        echo Invalid selection!
-        pause
-        goto BUILD_NVIDIA_OPTIONS
-    )
+set BUILD_PRESET=
+set BUILD_DIR=
+if "!build_choice!"=="1" (
+    set BUILD_PRESET=windows-release
+    set BUILD_DIR=build\release
+) else if "!build_choice!"=="2" (
+    set BUILD_PRESET=windows-debug
+    set BUILD_DIR=build\debug
+) else if "!build_choice!"=="3" (
+    set BUILD_PRESET=windows-release-vs
+    set BUILD_DIR=build\vs2022-release
+) else if "!build_choice!"=="4" (
+    set BUILD_PRESET=windows-debug-vs
+    set BUILD_DIR=build\vs2022-debug
+) else if "!build_choice!"=="5" (
+    goto MAIN_MENU
+) else (
+    echo Invalid selection!
+    pause
+    goto BUILD_NVIDIA_OPTIONS
+)
 
-    echo.
-    echo Building with preset: !BUILD_PRESET!
-    echo Build directory: !BUILD_DIR!
-    echo.
+echo.
+echo Building with preset: !BUILD_PRESET!
+echo Build directory: !BUILD_DIR!
+echo.
 
-    :: Check for Ninja if a Ninja preset is selected
-    echo !BUILD_PRESET! | findstr /i "ninja" >nul
-    if not errorlevel 1 (
-        where ninja >nul 2>nul
-        if errorlevel 1 (
-            echo.
-            echo ERROR: Ninja build tool not found in PATH!
-            echo You selected a Ninja preset, but Ninja is required.
-            echo Please install Ninja and add it to your system PATH.
-            echo You can download it from https://github.com/ninja-build/ninja/releases
-            echo or install via winget: 'winget install Ninja-build.Ninja'
-            echo.
-            pause
-            goto MAIN_MENU
-        ) else (
-            echo [✓] Ninja build tool found.
-        )
-    )
-
-    if not exist "!BUILD_DIR!" (
-        echo.
-        echo ERROR: Build directory !BUILD_DIR! does not exist!
-        echo Please configure the project first - Option 1 in main menu.
-        echo.
-        echo Steps:
-        echo 1. Go back to main menu
-        echo 2. Select "1. Configure Project"
-        echo 3. Choose NVIDIA configuration
-        echo 4. Then come back here to build
-        echo.
-        pause
-        goto MAIN_MENU
-    )
-
-    :: Use number of logical processors for parallel build
-    set "NUM_CORES=%NUMBER_OF_PROCESSORS%"
-    if not defined NUM_CORES set NUM_CORES=4
-
-    echo Building with !NUM_CORES! parallel jobs...
-    cmake --build --preset !BUILD_PRESET! -j!NUM_CORES!
-
+:: Check for Ninja if a Ninja preset is selected
+echo !BUILD_PRESET! | findstr /i "windows-release windows-debug" >nul
+if not errorlevel 1 (
+    where ninja >nul 2>nul
     if errorlevel 1 (
         echo.
-        echo Build failed!
-        pause
-    ) else (
+        echo ERROR: Ninja build tool not found in PATH!
+        echo You selected a Ninja preset, but Ninja is required.
+        echo Please install Ninja and add it to your system PATH.
+        echo You can download it from https://github.com/ninja-build/ninja/releases
+        echo or install via winget: 'winget install Ninja-build.Ninja'
         echo.
-        echo Build successful!
         pause
+        goto MAIN_MENU
+    ) else (
+        echo [?] Ninja build tool found.
     )
+)
+
+if not exist "!BUILD_DIR!" (
+    echo.
+    echo ERROR: Build directory !BUILD_DIR! does not exist!
+    echo Please configure the project first - Option 1 in main menu.
+    echo.
+    echo Steps:
+    echo 1. Go back to main menu
+    echo 2. Select "1. Configure Project"
+    echo 3. Choose NVIDIA configuration
+    echo 4. Then come back here to build
+    echo.
+    pause
     goto MAIN_MENU
+)
+
+:: Use number of logical processors for parallel build
+set "NUM_CORES=%NUMBER_OF_PROCESSORS%"
+if not defined NUM_CORES set NUM_CORES=4
+
+echo Building with !NUM_CORES! parallel jobs...
+cmake --build --preset !BUILD_PRESET! -j!NUM_CORES! --verbose
+
+if errorlevel 1 (
+    echo.
+    echo Build failed! Check output above for errors.
+    pause
+) else (
+    echo.
+    echo Build successful!
+    pause
+)
+goto MAIN_MENU
 
 :TEST
 cls
@@ -501,10 +514,10 @@ if "%test_choice%"=="1" (
     ) else (
         echo Running tests for NVIDIA/CUDA build...
         set TEST_EXECUTABLE=
-        if exist "build\ninja-release\sha1_miner.exe" (
-            set TEST_EXECUTABLE=build\ninja-release\sha1_miner.exe
-        ) else if exist "build\ninja-debug\sha1_miner.exe" (
-            set TEST_EXECUTABLE=build\ninja-debug\sha1_miner.exe
+        if exist "build\release\sha1_miner.exe" (
+            set TEST_EXECUTABLE=build\release\sha1_miner.exe
+        ) else if exist "build\debug\sha1_miner.exe" (
+            set TEST_EXECUTABLE=build\debug\sha1_miner.exe
         ) else if exist "build\vs2022-release\sha1_miner.exe" (
             set TEST_EXECUTABLE=build\vs2022-release\sha1_miner.exe
         ) else if exist "build\vs2022-debug\sha1_miner.exe" (
@@ -526,7 +539,7 @@ if "%test_choice%"=="1" (
     !test_cmd!
     pause
     goto MAIN_MENU
-) else if "%test_choice%"=="3" (
+) else if "%test_choice!"=="3" (
     goto MAIN_MENU
 ) else (
     echo Invalid selection!
@@ -552,17 +565,17 @@ echo.
 set /p clean_choice="Select directory to clean (1-8): "
 
 if "%clean_choice%"=="1" (
-    if exist "build\ninja-release" (
-        echo Cleaning build\ninja-release...
-        rmdir /s /q "build\ninja-release"
+    if exist "build\release" (
+        echo Cleaning build\release...
+        rmdir /s /q "build\release"
         echo Done!
     ) else (
         echo Directory not found!
     )
 ) else if "%clean_choice%"=="2" (
-    if exist "build\ninja-debug" (
-        echo Cleaning build\ninja-debug...
-        rmdir /s /q "build\ninja-debug"
+    if exist "build\debug" (
+        echo Cleaning build\debug...
+        rmdir /s /q "build\debug"
         echo Done!
     ) else (
         echo Directory not found!
@@ -603,7 +616,7 @@ if "%clean_choice%"=="1" (
     echo Cleaning all build directories...
     if exist "build" rmdir /s /q "build"
     echo Done!
-) else if "%clean_choice%"=="8" (
+) else if "%clean_choice!"=="8" (
     goto MAIN_MENU
 ) else (
     echo Invalid selection!
@@ -694,11 +707,11 @@ if %CUDA_FOUND%==0 (
 
 :CUDA_FOUND_LABEL
 if %CUDA_FOUND%==1 (
-    echo [✓] CUDA Toolkit found at: !CUDA_PATH_DETECTED!
+    echo [?] CUDA Toolkit found at: !CUDA_PATH_DETECTED!
     set "CUDA_PATH=!CUDA_PATH_DETECTED!"
     "!CUDA_PATH!\bin\nvcc.exe" --version >nul 2>&1
     if errorlevel 0 (
-        echo [✓] nvcc is functional.
+        echo [?] nvcc is functional.
         exit /b 0
     ) else (
         echo [!] nvcc found but not functional.
@@ -708,7 +721,7 @@ if %CUDA_FOUND%==1 (
     echo WARNING: CUDA Toolkit not found!
     echo CUDA builds may fail.
     echo Please ensure CUDA Toolkit is installed and CUDA_PATH is set.
-    echo Example: set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2
+    echo Example: set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9
     exit /b 1
 )
 
@@ -878,6 +891,36 @@ echo.
 pause
 exit /b 1
 
+:AUTO_DETECT_CUDA_ARCH
+echo Auto-detecting CUDA architecture...
+set CUDA_ARCHITECTURES=
+
+:: Try nvidia-smi to detect GPU
+where nvidia-smi >nul 2>nul
+if !errorlevel!==0 (
+    nvidia-smi --query-gpu=compute_cap --format=csv >"%TEMP%\cuda_info.txt" 2>nul
+    if !errorlevel!==0 (
+        set "CUDA_ARCHS_TEMP="
+        for /f "skip=1 tokens=2 delims=," %%a in ('type "%TEMP%\cuda_info.txt"') do (
+            set "CAP=%%a"
+            set "CAP=!CAP:.=!"
+            set CUDA_ARCHS_TEMP=!CUDA_ARCHS_TEMP!!CAP!;
+        )
+        del "%TEMP%\cuda_info.txt" >nul 2>&1
+        if not "!CUDA_ARCHS_TEMP!"=="" (
+            call :REMOVE_DUPLICATES "!CUDA_ARCHS_TEMP!" CUDA_ARCHITECTURES
+            echo Detected CUDA architectures: !CUDA_ARCHITECTURES!
+            exit /b 0
+        )
+    )
+)
+
+:: Fallback to a broad range of CUDA architectures
+echo Could not auto-detect CUDA architecture. Using default architectures...
+set CUDA_ARCHITECTURES=50;52;60;61;70;75;80;86;89;90;120
+echo Default CUDA architectures: !CUDA_ARCHITECTURES!
+exit /b 0
+
 :AUTO_DETECT_GPU_ARCH
 echo Auto-detecting GPU architecture...
 set HIP_ARCHITECTURES=
@@ -926,36 +969,6 @@ set HIP_ARCHITECTURES=gfx1030,gfx1031,gfx1032,gfx1100,gfx1101,gfx1102,gfx1200,gf
 echo Default architectures: !HIP_ARCHITECTURES!
 exit /b 0
 
-:AUTO_DETECT_CUDA_ARCH
-echo Auto-detecting CUDA architecture...
-set CUDA_ARCHITECTURES=
-
-:: Try nvidia-smi to detect GPU
-where nvidia-smi >nul 2>nul
-if !errorlevel!==0 (
-    nvidia-smi --query-gpu=compute_cap --format=csv >"%TEMP%\cuda_info.txt" 2>nul
-    if !errorlevel!==0 (
-        set "CUDA_ARCHS_TEMP="
-        for /f "skip=1 tokens=2 delims=," %%a in ('type "%TEMP%\cuda_info.txt"') do (
-            set "CAP=%%a"
-            set "CAP=!CAP:.=!"
-            set CUDA_ARCHS_TEMP=!CUDA_ARCHS_TEMP!!CAP!;
-        )
-        del "%TEMP%\cuda_info.txt" >nul 2>&1
-        if not "!CUDA_ARCHS_TEMP!"=="" (
-            call :REMOVE_DUPLICATES "!CUDA_ARCHS_TEMP!" CUDA_ARCHITECTURES
-            echo Detected CUDA architectures: !CUDA_ARCHITECTURES!
-            exit /b 0
-        )
-    )
-)
-
-:: Fallback to common CUDA architectures
-echo Could not auto-detect CUDA architecture. Using defaults...
-set CUDA_ARCHITECTURES=50;60;70;75;80;86;89;90
-echo Default CUDA architectures: !CUDA_ARCHITECTURES!
-exit /b 0
-
 :REMOVE_DUPLICATES
 set "INPUT_LIST=%~1"
 set "OUTPUT_VAR_NAME=%~2"
@@ -979,38 +992,38 @@ if exist "!ROCM_PATH!\bin\hipcc.bin.exe" (
 )
 
 if defined HIPCC_PATH (
-    echo [✓] hipcc found (!HIPCC_PATH!)
+    echo [?] hipcc found (!HIPCC_PATH!)
     !HIPCC_PATH! --version >nul 2>&1
     if !errorlevel!==0 (
-        echo [✓] hipcc is functional
+        echo [?] hipcc is functional
         set ROCM_COMPONENTS_OK=1
     ) else (
         echo [!] hipcc found but not functional
     )
 ) else (
-    echo [✗] hipcc NOT found
+    echo [?] hipcc NOT found
 )
 
 if exist "!ROCM_PATH!\bin\hipconfig.exe" (
-    echo [✓] hipconfig found
+    echo [?] hipconfig found
 ) else (
-    echo [✗] hipconfig NOT found
+    echo [?] hipconfig NOT found
 )
 
 if exist "!ROCM_PATH!\lib\cmake\hip" (
-    echo [✓] HIP CMake modules found
+    echo [?] HIP CMake modules found
 ) else (
-    echo [✗] HIP CMake modules NOT found
+    echo [?] HIP CMake modules NOT found
 )
 
 if exist "!ROCM_PATH!\bin\amdhip64.dll" (
-    echo [✓] HIP runtime library found
+    echo [?] HIP runtime library found
 ) else (
-    echo [✗] HIP runtime library NOT found
+    echo [?] HIP runtime library NOT found
 )
 
 if exist "!ROCM_PATH!\bin\rocm-smi.exe" (
-    echo [✓] rocm-smi found
+    echo [?] rocm-smi found
 ) else (
     echo [!] rocm-smi NOT found (optional)
 )
