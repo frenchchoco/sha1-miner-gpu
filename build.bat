@@ -84,17 +84,81 @@ if errorlevel 1 (
     goto MAIN_MENU
 )
 
-if "!GPU_BACKEND!"=="NVIDIA" (
-    goto CONFIGURE_NVIDIA_OPTIONS
-) else if "!GPU_BACKEND!"=="AMD" (
-    goto CONFIGURE_AMD_OPTIONS
-) else (
-    echo ERROR: Unknown GPU_BACKEND value: !GPU_BACKEND!
-    pause
-    goto MAIN_MENU
-)
+echo DEBUG: GPU_BACKEND before configure branch: "!GPU_BACKEND!"
 
-:CONFIGURE_AMD_OPTIONS
+if /i "!GPU_BACKEND!"=="NVIDIA" (
+    echo Entering NVIDIA/CUDA configuration options...
+    echo NVIDIA/CUDA Build Options:
+    echo 1. Windows Release (Ninja)
+    echo 2. Windows Debug (Ninja)
+    echo 3. Windows Release (Visual Studio 2022)
+    echo 4. Windows Debug (Visual Studio 2022)
+    echo 5. Back to Main Menu
+    echo.
+    set /p config_choice="Select configuration (1-5): "
+
+    set PRESET=
+    if "!config_choice!"=="1" (
+        set PRESET=windows-ninja-release
+    ) else if "!config_choice!"=="2" (
+        set PRESET=windows-ninja-debug
+    ) else if "!config_choice!"=="3" (
+        set PRESET=windows-vs2022-release
+    ) else if "!config_choice!"=="4" (
+        set PRESET=windows-vs2022-debug
+    ) else if "!config_choice!"=="5" (
+        goto MAIN_MENU
+    ) else (
+        echo Invalid selection!
+        pause
+        goto CONFIGURE
+    )
+
+    echo.
+    echo Configuring with preset: !PRESET!
+    echo.
+
+    :: Check NVIDIA dependencies
+    call :CHECK_NVIDIA_TOOLS
+    if errorlevel 1 (
+        echo Configuration aborted due to missing NVIDIA/CUDA tools.
+        pause
+        goto MAIN_MENU
+    )
+
+    :: Check for Ninja if a Ninja preset is selected
+    echo !PRESET! | findstr /i "ninja" >nul
+    if not errorlevel 1 (
+        where ninja >nul 2>nul
+        if errorlevel 1 (
+            echo.
+            echo ERROR: Ninja build tool not found in PATH!
+            echo You selected a Ninja preset, but Ninja is required.
+            echo Please install Ninja and add it to your system PATH.
+            echo You can download it from https://github.com/ninja-build/ninja/releases
+            echo or install via winget: 'winget install Ninja-build.Ninja'
+            echo.
+            pause
+            goto MAIN_MENU
+        ) else (
+            echo [✓] Ninja build tool found.
+        )
+    )
+
+    :: Run CMake configure for NVIDIA
+    cmake --preset !PRESET!
+
+    if errorlevel 1 (
+        echo.
+        echo Configuration failed!
+        pause
+    ) else (
+        echo.
+        echo Configuration successful!
+        pause
+    )
+    goto MAIN_MENU
+) else if /i "!GPU_BACKEND!"=="AMD" (
     echo Entering AMD/HIP configuration options...
     echo AMD/HIP Build Options:
     echo 1. Windows AMD Release (HIP/ROCm)
@@ -114,7 +178,7 @@ if "!GPU_BACKEND!"=="NVIDIA" (
     ) else (
         echo Invalid selection!
         pause
-        goto CONFIGURE_AMD_OPTIONS
+        goto CONFIGURE
     )
 
     echo.
@@ -178,49 +242,63 @@ if "!GPU_BACKEND!"=="NVIDIA" (
         pause
     )
     goto MAIN_MENU
+) else (
+    echo ERROR: Unknown GPU_BACKEND value: !GPU_BACKEND!
+    pause
+    goto MAIN_MENU
+)
 
-:CONFIGURE_NVIDIA_OPTIONS
-    echo Entering NVIDIA/CUDA configuration options...
+:BUILD
+cls
+echo ==============================
+echo    Build Project
+==============================
+echo.
+
+:: Setup Visual Studio environment for builds
+call :SETUP_VS_ENV
+if errorlevel 1 (
+    echo Build aborted due to Visual Studio environment setup failure.
+    pause
+    goto MAIN_MENU
+)
+
+echo DEBUG: GPU_BACKEND before build branch: "!GPU_BACKEND!"
+
+if /i "!GPU_BACKEND!"=="NVIDIA" (
+    echo Entering NVIDIA/CUDA build options...
     echo NVIDIA/CUDA Build Options:
     echo 1. Windows Release (Ninja)
     echo 2. Windows Debug (Ninja)
-    echo 3. Windows Release (Visual Studio 2022)
-    echo 4. Windows Debug (Visual Studio 2022)
+    echo 3. Windows Release (Visual Studio)
+    echo 4. Windows Debug (Visual Studio)
     echo 5. Back to Main Menu
     echo.
-    set /p config_choice="Select configuration (1-5): "
+    set /p build_choice="Select build configuration (1-5): "
 
-    set PRESET=
-    if "!config_choice!"=="1" (
-        set PRESET=windows-ninja-release
-    ) else if "!config_choice!"=="2" (
-        set PRESET=windows-ninja-debug
-    ) else if "!config_choice!"=="3" (
-        set PRESET=windows-vs2022-release
-    ) else if "!config_choice!"=="4" (
-        set PRESET=windows-vs2022-debug
-    ) else if "!config_choice!"=="5" (
+    set BUILD_PRESET=
+    if "!build_choice!"=="1" (
+        set BUILD_PRESET=windows-release
+    ) else if "!build_choice!"=="2" (
+        set BUILD_PRESET=windows-debug
+    ) else if "!build_choice!"=="3" (
+        set BUILD_PRESET=windows-release-vs
+    ) else if "!build_choice!"=="4" (
+        set BUILD_PRESET=windows-debug-vs
+    ) else if "!build_choice!"=="5" (
         goto MAIN_MENU
     ) else (
         echo Invalid selection!
         pause
-        goto CONFIGURE_NVIDIA_OPTIONS
+        goto BUILD
     )
 
     echo.
-    echo Configuring with preset: !PRESET!
+    echo Building with preset: !BUILD_PRESET!
     echo.
-
-    :: Check NVIDIA dependencies
-    call :CHECK_NVIDIA_TOOLS
-    if errorlevel 1 (
-        echo Configuration aborted due to missing NVIDIA/CUDA tools.
-        pause
-        goto MAIN_MENU
-    )
 
     :: Check for Ninja if a Ninja preset is selected
-    echo !PRESET! | findstr /i "ninja" >nul
+    echo !BUILD_PRESET! | findstr /i "ninja" >nul
     if not errorlevel 1 (
         where ninja >nul 2>nul
         if errorlevel 1 (
@@ -238,46 +316,19 @@ if "!GPU_BACKEND!"=="NVIDIA" (
         )
     )
 
-    :: Run CMake configure for NVIDIA
-    cmake --preset !PRESET!
+    cmake --build --preset !BUILD_PRESET!
 
     if errorlevel 1 (
         echo.
-        echo Configuration failed!
+        echo Build failed!
         pause
     ) else (
         echo.
-        echo Configuration successful!
+        echo Build successful!
         pause
     )
     goto MAIN_MENU
-
-:BUILD
-cls
-echo ==============================
-echo    Build Project
-==============================
-echo.
-
-:: Setup Visual Studio environment for builds
-call :SETUP_VS_ENV
-if errorlevel 1 (
-    echo Build aborted due to Visual Studio environment setup failure.
-    pause
-    goto MAIN_MENU
-)
-
-if "!GPU_BACKEND!"=="NVIDIA" (
-    goto BUILD_NVIDIA_OPTIONS
-) else if "!GPU_BACKEND!"=="AMD" (
-    goto BUILD_AMD_OPTIONS
-) else (
-    echo ERROR: Unknown GPU_BACKEND value: !GPU_BACKEND!
-    pause
-    goto MAIN_MENU
-)
-
-:BUILD_AMD_OPTIONS
+) else if /i "!GPU_BACKEND!"=="AMD" (
     echo Entering AMD/HIP build options...
     echo AMD/HIP Build Options:
     echo 1. Windows AMD Release
@@ -297,7 +348,7 @@ if "!GPU_BACKEND!"=="NVIDIA" (
     ) else (
         echo Invalid selection!
         pause
-        goto BUILD_AMD_OPTIONS
+        goto BUILD
     )
 
     echo.
@@ -351,70 +402,11 @@ if "!GPU_BACKEND!"=="NVIDIA" (
         pause
     )
     goto MAIN_MENU
-
-:BUILD_NVIDIA_OPTIONS
-    echo Entering NVIDIA/CUDA build options...
-    echo NVIDIA/CUDA Build Options:
-    echo 1. Windows Release (Ninja)
-    echo 2. Windows Debug (Ninja)
-    echo 3. Windows Release (Visual Studio)
-    echo 4. Windows Debug (Visual Studio)
-    echo 5. Back to Main Menu
-    echo.
-    set /p build_choice="Select build configuration (1-5): "
-
-    set BUILD_PRESET=
-    if "!build_choice!"=="1" (
-        set BUILD_PRESET=windows-release
-    ) else if "!build_choice!"=="2" (
-        set BUILD_PRESET=windows-debug
-    ) else if "!build_choice!"=="3" (
-        set BUILD_PRESET=windows-release-vs
-    ) else if "!build_choice!"=="4" (
-        set BUILD_PRESET=windows-debug-vs
-    ) else if "!build_choice!"=="5" (
-        goto MAIN_MENU
-    ) else (
-        echo Invalid selection!
-        pause
-        goto BUILD_NVIDIA_OPTIONS
-    )
-
-    echo.
-    echo Building with preset: !BUILD_PRESET!
-    echo.
-
-    :: Check for Ninja if a Ninja preset is selected
-    echo !BUILD_PRESET! | findstr /i "ninja" >nul
-    if not errorlevel 1 (
-        where ninja >nul 2>nul
-        if errorlevel 1 (
-            echo.
-            echo ERROR: Ninja build tool not found in PATH!
-            echo You selected a Ninja preset, but Ninja is required.
-            echo Please install Ninja and add it to your system PATH.
-            echo You can download it from https://github.com/ninja-build/ninja/releases
-            echo or install via winget: 'winget install Ninja-build.Ninja'
-            echo.
-            pause
-            goto MAIN_MENU
-        ) else (
-            echo [✓] Ninja build tool found.
-        )
-    )
-
-    cmake --build --preset !BUILD_PRESET!
-
-    if errorlevel 1 (
-        echo.
-        echo Build failed!
-        pause
-    ) else (
-        echo.
-        echo Build successful!
-        pause
-    )
+) else (
+    echo ERROR: Unknown GPU_BACKEND value: !GPU_BACKEND!
+    pause
     goto MAIN_MENU
+)
 
 :TEST
 cls
