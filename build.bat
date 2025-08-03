@@ -952,7 +952,7 @@ if !errorlevel!==0 (
 
 :: Fallback to common CUDA architectures
 echo Could not auto-detect CUDA architecture. Using defaults...
-set CUDA_ARCHITECTURES=60;70;75;80;86;89;90
+set CUDA_ARCHITECTURES=50;60;70;75;80;86;89;90
 echo Default CUDA architectures: !CUDA_ARCHITECTURES!
 exit /b 0
 
