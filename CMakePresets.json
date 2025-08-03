@@ -91,40 +91,6 @@
       }
     },
     {
-      "name": "windows-hip-release",
-      "displayName": "Windows Release (HIP/ROCm + Boost.Beast)",
-      "inherits": "windows-vcpkg-base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/hip-release",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "USE_HIP": "ON",
-        "ROCM_PATH": "$ENV{ROCM_PATH}",
-        "HIP_ARCH": "$ENV{HIP_ARCHITECTURES}"
-      },
-      "environment": {
-        "ROCM_PATH": "$ENV{ROCM_PATH}",
-        "HIP_ARCHITECTURES": "$ENV{HIP_ARCHITECTURES}"
-      }
-    },
-    {
-      "name": "windows-hip-debug",
-      "displayName": "Windows Debug (HIP/ROCm + Boost.Beast)",
-      "inherits": "windows-vcpkg-base",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/hip-debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "USE_HIP": "ON",
-        "ROCM_PATH": "$ENV{ROCM_PATH}",
-        "HIP_ARCH": "$ENV{HIP_ARCHITECTURES}"
-      },
-      "environment": {
-        "ROCM_PATH": "$ENV{ROCM_PATH}",
-        "HIP_ARCHITECTURES": "$ENV{HIP_ARCHITECTURES}"
-      }
-    },
-    {
       "name": "linux-gcc-release",
       "displayName": "Linux Release (GCC + CUDA + Boost.Beast)",
       "generator": "Ninja",
@@ -238,24 +204,6 @@
       "configurePreset": "windows-vs2022-debug",
       "configuration": "Debug",
       "jobs": 12
-    },
-    {
-      "name": "windows-hip-release-build",
-      "displayName": "Windows HIP/AMD Release Build",
-      "configurePreset": "windows-hip-release",
-      "jobs": 12,
-      "targets": [
-        "sha1_miner"
-      ]
-    },
-    {
-      "name": "windows-hip-debug-build",
-      "displayName": "Windows HIP/AMD Debug Build",
-      "configurePreset": "windows-hip-debug",
-      "jobs": 12,
-      "targets": [
-        "sha1_miner"
-      ]
     },
     {
       "name": "linux-release",
