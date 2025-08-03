@@ -53,7 +53,7 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
@@ -86,7 +86,7 @@
       "binaryDir": "${sourceDir}/build/vs2022-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20"
       }
     },
@@ -113,7 +113,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++",
-        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90;120",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20"
       }
