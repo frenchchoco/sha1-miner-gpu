@@ -198,17 +198,19 @@ if [ "$GPU_TYPE" = "CUDA" ]; then
             CUDA_ARCH="$DETECTED_ARCH"
             print_info "Detected GPU architecture: sm_$CUDA_ARCH"
 
-            # Map to GPU name for user info (updated with Blackwell)
+            # Map to GPU name for user info
             case "$CUDA_ARCH" in
-                50|52) GPU_NAME="Maxwell" ;;
-                60|61) GPU_NAME="Pascal" ;;
-                70) GPU_NAME="Volta (V100)" ;;
-                75) GPU_NAME="Turing (T4, RTX 20xx)" ;;
-                80) GPU_NAME="Ampere (A100, RTX 30xx)" ;;
-                86) GPU_NAME="Ampere (RTX 3050-3070 laptop)" ;;
-                89) GPU_NAME="Ada Lovelace (L4, L40, RTX 40xx)" ;;
+                50|52) GPU_NAME="Maxwell (GTX 900 series)" ;;
+                60) GPU_NAME="Pascal (GTX 10xx, P100)" ;;
+                61) GPU_NAME="Pascal (GTX 1050-1080)" ;;
+                70) GPU_NAME="Volta (V100, Titan V)" ;;
+                75) GPU_NAME="Turing (RTX 20xx, GTX 16xx, T4)" ;;
+                80) GPU_NAME="Ampere (A100, A30, A40)" ;;
+                86) GPU_NAME="Ampere (RTX 30xx consumer)" ;;
+                89) GPU_NAME="Ada Lovelace (RTX 40xx, L4, L40/L40S)" ;;
                 90) GPU_NAME="Hopper (H100, H200)" ;;
-                120) GPU_NAME="Blackwell (B100, B200, GB200)" ;;
+                100) GPU_NAME="Grace Hopper (GH100, GH200)" ;;
+                120) GPU_NAME="Blackwell (RTX 50xx, B100, B200, GB200)" ;;
                 *) GPU_NAME="Unknown" ;;
             esac
             print_info "GPU Generation: $GPU_NAME"
@@ -270,11 +272,11 @@ if [ "$GPU_TYPE" = "HIP" ]; then
             for arch in "${ARCH_ARRAY[@]}"; do
                 case "$arch" in
                     gfx900) echo "  - $arch (Vega 10)" ;;
-                    gfx906) echo "  - $arch (Vega 20)" ;;
+                    gfx906) echo "  - $arch (Vega 20, Radeon VII)" ;;
                     gfx908) echo "  - $arch (MI100)" ;;
-                    gfx90a) echo "  - $arch (MI200)" ;;
-                    gfx940) echo "  - $arch (MI300)" ;;
-                    gfx1010) echo "  - $arch (RDNA1 - RX 5000 series)" ;;
+                    gfx90a) echo "  - $arch (MI200 series)" ;;
+                    gfx940) echo "  - $arch (MI300 series)" ;;
+                    gfx1010) echo "  - $arch (RDNA1 - RX 5500/5600/5700)" ;;
                     gfx1030) echo "  - $arch (RDNA2 - RX 6000 series)" ;;
                     gfx1100) echo "  - $arch (RDNA3 - RX 7000 series)" ;;
                     *) echo "  - $arch" ;;
@@ -321,20 +323,13 @@ else
     CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_COMPILER=$CUDA_PATH/bin/nvcc"
     CMAKE_ARGS="$CMAKE_ARGS -DCUDAToolkit_ROOT=$CUDA_PATH"
 
+    # Add compiler flags to fix glibc compatibility issue
+    CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_FLAGS=\"-D_DISABLE_MATHCALLS_LEGACY\""
+
     if [ -n "$CUDA_ARCH" ]; then
         CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH"
         print_info "Building specifically for architecture: sm_$CUDA_ARCH"
     fi
-fi
-
-# Add paths for uWebSockets and uSockets
-PROJECT_ROOT=$(dirname "$(pwd)")
-CMAKE_ARGS="$CMAKE_ARGS -DUWEBSOCKETS_INCLUDE_DIR=$PROJECT_ROOT/external/uWebSockets/src"
-CMAKE_ARGS="$CMAKE_ARGS -DUSOCKETS_INCLUDE_DIR=$PROJECT_ROOT/external/uSockets/src"
-
-# If uSockets was built, add the library path
-if [ -f "$PROJECT_ROOT/external/uSockets/uSockets.a" ]; then
-    CMAKE_ARGS="$CMAKE_ARGS -DUSOCKETS_LIB=$PROJECT_ROOT/external/uSockets/uSockets.a"
 fi
 
 print_info "Running CMake with args: $CMAKE_ARGS"
