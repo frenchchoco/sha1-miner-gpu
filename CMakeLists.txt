@@ -357,15 +357,30 @@ else ()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-        set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90")
-        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.0")
-            list(APPEND CMAKE_CUDA_ARCHITECTURES "90a")
+    if (NOT CMAKE_CUDA_ARCHITECTURES)
+        # Detect CUDA version and set appropriate architectures
+        if (CUDAToolkit_VERSION VERSION_LESS "11.0")
+            set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75")
+        elseif (CUDAToolkit_VERSION VERSION_LESS "11.1")
+            set(CMAKE_CUDA_ARCHITECTURES "52;60;61;70;75;80")
+        elseif (CUDAToolkit_VERSION VERSION_LESS "11.8")
+            set(CMAKE_CUDA_ARCHITECTURES "52;60;61;70;75;80;86")
+        elseif (CUDAToolkit_VERSION VERSION_LESS "12.0")
+            set(CMAKE_CUDA_ARCHITECTURES "52;60;61;70;75;80;86;89;90")
+        else ()
+            # CUDA 12.0+ dropped support for sm_50 and sm_52
+            set(CMAKE_CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90")
+
+            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.0")
+                list(APPEND CMAKE_CUDA_ARCHITECTURES "90a")
+            endif ()
+
+            if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+                list(APPEND CMAKE_CUDA_ARCHITECTURES "120")
+            endif ()
         endif ()
 
-        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
-            list(APPEND CMAKE_CUDA_ARCHITECTURES "120")
-        endif ()
+        message(STATUS "Auto-selected CUDA architectures based on CUDA ${CUDAToolkit_VERSION}: ${CMAKE_CUDA_ARCHITECTURES}")
     endif ()
 
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3 -lineinfo")

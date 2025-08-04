@@ -30,6 +30,55 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# Function to find the best CUDA installation
+find_cuda() {
+    local cuda_paths=()
+
+    # Check common CUDA installation paths
+    for path in /usr/local/cuda* /opt/cuda* /usr/lib/cuda; do
+        if [ -d "$path" ] && [ -f "$path/bin/nvcc" ]; then
+            cuda_paths+=("$path")
+        fi
+    done
+
+    # Sort by version (newest first)
+    if [ ${#cuda_paths[@]} -gt 0 ]; then
+        # Get the highest version
+        local best_cuda=$(printf '%s\n' "${cuda_paths[@]}" | sort -V -r | head -n1)
+        echo "$best_cuda"
+        return 0
+    fi
+
+    # Check if nvcc is in PATH
+    if command -v nvcc &> /dev/null; then
+        local nvcc_path=$(which nvcc)
+        local cuda_root=$(dirname $(dirname "$nvcc_path"))
+        if [ -d "$cuda_root" ]; then
+            echo "$cuda_root"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Function to detect GPU architecture
+detect_gpu_arch() {
+    if ! command -v nvidia-smi &> /dev/null; then
+        return 1
+    fi
+
+    # Get compute capability
+    local compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '.')
+
+    if [ -n "$compute_cap" ]; then
+        echo "$compute_cap"
+        return 0
+    fi
+
+    return 1
+}
+
 # Default settings
 BUILD_TYPE="Release"
 GPU_TYPE=""
@@ -37,6 +86,7 @@ HIP_ARCH=""
 CMAKE_ARGS=""
 THREADS=$(nproc)
 CLEAN_BUILD=0
+CUDA_ARCH=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -54,7 +104,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --arch)
-            HIP_ARCH="$2"
+            if [ "$GPU_TYPE" = "HIP" ] || [ -z "$GPU_TYPE" ]; then
+                HIP_ARCH="$2"
+            else
+                CUDA_ARCH="$2"
+            fi
             shift 2
             ;;
         --clean)
@@ -71,7 +125,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --debug           Build in debug mode"
             echo "  --cuda            Force CUDA build (NVIDIA)"
             echo "  --hip, --amd      Force HIP build (AMD)"
-            echo "  --arch <arch>     Specify AMD GPU architecture (e.g., gfx1030)"
+            echo "  --arch <arch>     Specify GPU architecture"
             echo "  --clean           Clean build directory before building"
             echo "  --threads, -j N   Number of build threads (default: $(nproc))"
             echo "  --help, -h        Show this help message"
@@ -115,9 +169,58 @@ if [ -z "$GPU_TYPE" ]; then
     fi
 fi
 
+# NVIDIA-specific setup
+if [ "$GPU_TYPE" = "CUDA" ]; then
+    # Find best CUDA installation
+    CUDA_PATH=$(find_cuda)
+    if [ $? -ne 0 ] || [ -z "$CUDA_PATH" ]; then
+        print_error "CUDA installation not found!"
+        print_info "Please install CUDA toolkit or set CUDA_HOME environment variable"
+        exit 1
+    fi
+
+    print_info "Found CUDA installation: $CUDA_PATH"
+
+    # Set CUDA environment
+    export PATH="$CUDA_PATH/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_PATH/lib64:$LD_LIBRARY_PATH"
+    export CUDA_HOME="$CUDA_PATH"
+    export CUDACXX="$CUDA_PATH/bin/nvcc"
+
+    # Verify CUDA version
+    CUDA_VERSION=$($CUDA_PATH/bin/nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+    print_info "CUDA version: $CUDA_VERSION"
+
+    # Auto-detect GPU architecture if not specified
+    if [ -z "$CUDA_ARCH" ]; then
+        DETECTED_ARCH=$(detect_gpu_arch)
+        if [ $? -eq 0 ] && [ -n "$DETECTED_ARCH" ]; then
+            CUDA_ARCH="$DETECTED_ARCH"
+            print_info "Detected GPU architecture: sm_$CUDA_ARCH"
+
+            # Map to GPU name for user info (updated with Blackwell)
+            case "$CUDA_ARCH" in
+                50|52) GPU_NAME="Maxwell" ;;
+                60|61) GPU_NAME="Pascal" ;;
+                70) GPU_NAME="Volta (V100)" ;;
+                75) GPU_NAME="Turing (T4, RTX 20xx)" ;;
+                80) GPU_NAME="Ampere (A100, RTX 30xx)" ;;
+                86) GPU_NAME="Ampere (RTX 3050-3070 laptop)" ;;
+                89) GPU_NAME="Ada Lovelace (L4, L40, RTX 40xx)" ;;
+                90) GPU_NAME="Hopper (H100, H200)" ;;
+                120) GPU_NAME="Blackwell (B100, B200, GB200)" ;;
+                *) GPU_NAME="Unknown" ;;
+            esac
+            print_info "GPU Generation: $GPU_NAME"
+        else
+            print_warning "Could not auto-detect GPU architecture"
+            print_info "Will use default CUDA architectures"
+        fi
+    fi
+fi
+
 # AMD-specific setup
 if [ "$GPU_TYPE" = "HIP" ]; then
-    # Find ROCm installation
     if [ -n "$ROCM_PATH" ]; then
         print_info "Using ROCM_PATH: $ROCM_PATH"
     elif [ -d /opt/rocm ]; then
@@ -190,7 +293,7 @@ if [ "$GPU_TYPE" = "HIP" ]; then
         fi
     fi
 
-    print_info "Will build for detected architectures: $HIP_ARCH"
+    print_info "Will build for architectures: $HIP_ARCH"
 fi
 
 # Create build directory
@@ -215,6 +318,13 @@ if [ "$GPU_TYPE" = "HIP" ]; then
 else
     print_info "Configuring for NVIDIA GPUs..."
     CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+    CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_COMPILER=$CUDA_PATH/bin/nvcc"
+    CMAKE_ARGS="$CMAKE_ARGS -DCUDAToolkit_ROOT=$CUDA_PATH"
+
+    if [ -n "$CUDA_ARCH" ]; then
+        CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH"
+        print_info "Building specifically for architecture: sm_$CUDA_ARCH"
+    fi
 fi
 
 # Add paths for uWebSockets and uSockets
