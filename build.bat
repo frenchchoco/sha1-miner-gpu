@@ -7,8 +7,10 @@ verify >nul
 :: Supports NVIDIA/CUDA and AMD/HIP builds on Windows
 :: For cross-platform compatibility (Linux, macOS), consider using Python or CMake directly
 
-:: Initialize GPU backend
-if "%GPU_BACKEND%"=="" set GPU_BACKEND=NVIDIA
+:: Automatically detect GPU backend at startup
+if "%GPU_BACKEND%"=="" (
+    call :AUTO_DETECT_GPU
+)
 
 :: Manual ROCm path override - uncomment and modify if auto-detection fails
 :: set "ROCM_PATH=C:\Program Files\AMD\ROCm\6.2"
@@ -681,6 +683,45 @@ echo Package installation complete!
 pause
 goto MAIN_MENU
 
+:AUTO_DETECT_GPU
+echo.
+echo Attempting to auto-detect GPU backend...
+set "GPU_TYPE=NONE"
+
+:: Check for GPUs using PowerShell and WMI
+for /f "tokens=*" %%i in ('powershell -Command "Get-WmiObject -Class Win32_VideoController | Select-Object -ExpandProperty Name" 2^>nul') do (
+    echo Auto-detect: Found GPU: %%i
+    echo %%i | findstr /i "NVIDIA" >nul
+    if not errorlevel 1 (
+        echo Auto-detect: NVIDIA GPU detected.
+        set "GPU_TYPE=NVIDIA"
+    )
+    echo %%i | findstr /i "AMD" >nul
+    if not errorlevel 1 (
+        echo Auto-detect: AMD GPU detected.
+        set "GPU_TYPE=AMD"
+    )
+    echo %%i | findstr /i "Radeon" >nul
+    if not errorlevel 1 (
+        echo Auto-detect: AMD Radeon GPU detected.
+        set "GPU_TYPE=AMD"
+    )
+)
+
+if "%GPU_TYPE%"=="NVIDIA" (
+    echo Auto-detect: Setting backend to NVIDIA.
+    set "GPU_BACKEND=NVIDIA"
+) else if "%GPU_TYPE%"=="AMD" (
+    echo Auto-detect: Setting backend to AMD.
+    set "GPU_BACKEND=AMD"
+) else (
+    echo Auto-detect: No supported GPU detected. Defaulting to NVIDIA.
+    set "GPU_BACKEND=NVIDIA"
+)
+
+echo.
+exit /b 0
+
 :CHECK_NVIDIA_TOOLS
 :: Check for CUDA
 set CUDA_FOUND=0
@@ -959,7 +1000,6 @@ if exist "!ROCM_PATH!\bin\hipinfo.exe" (
                 exit /b 0
             )
         )
-        del "%TEMP%\hip_info.txt" >nul 2>&1
     )
 )
 
