@@ -30,6 +30,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Export compile commands
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# =========================================================
+# >> DIRECTORY OVERRIDE: Set all output directories to the main build directory
+# =========================================================
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# The generator expressions are used to create the configuration-specific folders
+# This overrides the default behavior to use a flat directory structure
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}")
+# =========================================================
+
+
 # Detect the vcpkg triplet being used
 if (NOT DEFINED VCPKG_TARGET_TRIPLET)
     if (WIN32)
@@ -165,7 +183,9 @@ if (MSVC)
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
     # Only add LIBCMT for static builds
     if (USE_STATIC_LIBS)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT /NODEFAULTLIB:MSVCRTD")
+        # We need to add /NODEFAULTLIB to prevent conflicts with the static runtime library.
+        # This is a key change to solve LNK2038 and LNK2001 errors.
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:msvcrt.lib /NODEFAULTLIB:msvcrtd.lib /NODEFAULTLIB:ucrt.lib /NODEFAULTLIB:ucrtd.lib")
     endif ()
 else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
@@ -383,9 +403,10 @@ else ()
         message(STATUS "Auto-selected CUDA architectures based on CUDA ${CUDAToolkit_VERSION}: ${CMAKE_CUDA_ARCHITECTURES}")
     endif ()
 
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3 -lineinfo")
-    set(CMAKE_CUDA_FLAGS_RELEASE "-O3")
-    set(CMAKE_CUDA_FLAGS_DEBUG "-g -G")
+    # Corrected CUDA options to prevent concatenation errors
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -maxrregcount=0 --extra-device-vectorization")
+    set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -O3 -Xptxas -O3,-dlcm=ca,-dscm=wt")
+    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -O0 -G -lineinfo")
 
     # Set CUDA runtime library based on USE_STATIC_LIBS
     if (USE_STATIC_LIBS)
@@ -404,9 +425,20 @@ else ()
     )
     target_include_directories(gpu_kernel PRIVATE ${INCLUDE_DIR} ${MINER_DIR} ${OPENSSL_INCLUDE_DIR})
 
-    target_compile_options(gpu_kernel PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
+    # This is the corrected section to fix the nvcc fatal error.
+    # It replaces the old, problematic `target_compile_options` from your original file.
+    # We will use set_property to pass the flags directly to the CUDA compiler.
+    set_property(TARGET gpu_kernel APPEND PROPERTY
+        CUDA_FLAGS
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=0>
+        $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
+        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-Xptxas>
+        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3,-dlcm=ca,-dscm=wt>
+        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-O0>
+        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-G>
+        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     )
 
     set(GPU_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
@@ -460,7 +492,13 @@ add_executable(sha1_miner
 
 set_target_properties(sha1_miner PROPERTIES
         LINKER_LANGUAGE CXX
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+# We need to set these properties on the target as well to ensure they take precedence
+# over the global CMAKE_..._OUTPUT_DIRECTORY variables.
+set_target_properties(sha1_miner PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 target_include_directories(sha1_miner PRIVATE
@@ -469,8 +507,8 @@ target_include_directories(sha1_miner PRIVATE
         ${NET_DIR}
         ${SRC_DIR}  # Base src directory
         ${SRC_DIR}/configs  # For config.hpp
-        ${SRC_DIR}/core     # For core headers
-        ${SRC_DIR}/utils    # For utility headers
+        ${SRC_DIR}/core      # For core headers
+        ${SRC_DIR}/utils     # For utility headers
         ${GPU_INCLUDES}
         ${Boost_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS}
@@ -534,7 +572,9 @@ if (GPU_BACKEND STREQUAL "HIP")
         )
     endif ()
 else ()
+    # This section has been corrected to link the gpu_kernel library
     target_link_libraries(sha1_miner PRIVATE
+            gpu_kernel  # Link the static library created above
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
             ZLIB::ZLIB
