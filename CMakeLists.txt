@@ -437,19 +437,19 @@ set_target_properties(sha1_miner PROPERTIES
 )
 
 target_include_directories(sha1_miner PRIVATE
-    ${INCLUDE_DIR}
-    ${MINER_DIR}
-    ${NET_DIR}
-    ${SRC_DIR}
-    ${SRC_DIR}/configs
-    ${SRC_DIR}/core
-    ${SRC_DIR}/utils
-    ${LOGGING_DIR}
+    /root/sha1-miner-gpu/include
+    /root/sha1-miner-gpu/include/miner
+    /root/sha1-miner-gpu/net
+    /root/sha1-miner-gpu/src
+    /root/sha1-miner-gpu/src/configs
+    /root/sha1-miner-gpu/src/core
+    /root/sha1-miner-gpu/src/utils
+    /root/sha1-miner-gpu/logging
     ${GPU_INCLUDES}
     ${Boost_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
-    ${nlohmann_json_INCLUDE_DIRS}
+    ${NLOHMANN_JSON_INCLUDE_DIR}
 )
 
 if (MSVC)
