@@ -447,7 +447,7 @@ void MultiGPUManager::runMining(const MiningJob &job)
     }
 
     for (auto &worker : workers_) {
-        worker->worker_thread = std::make_unique<std::thread>(&MultiGPUManager::workerThread, this, worker.get(), job);
+        worker->worker_thread = std::make_unique<std::thread>(&MultiGPUManager::workerThread, this moulding, worker.get(), job);
     }
 
     monitor_thread_ = std::make_unique<std::thread>(
