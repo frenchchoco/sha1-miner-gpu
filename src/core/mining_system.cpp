@@ -13,7 +13,7 @@
 // Assuming these are defined elsewhere
 #include "mining_system.h"
 #include "gpu_api.h" // Hypothetical header for gpu-related functions
-#include "logging.h" // Hypothetical logging header
+#include "logging/logger.hpp" // Hypothetical logging header
 
 // Global shutdown flag
 std::atomic<bool> g_shutdown(false);
