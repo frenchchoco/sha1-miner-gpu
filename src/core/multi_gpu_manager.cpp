@@ -8,7 +8,7 @@
 #include <cmath> // For std::pow
 
 #include "config_utils.hpp"
-#include "logging.hpp"
+#include "logger/logging.hpp"
 
 // Define a safe sleep duration to prevent a hard spin
 constexpr std::chrono::milliseconds WORKER_THREAD_SLEEP_MS = std::chrono::milliseconds(5);
