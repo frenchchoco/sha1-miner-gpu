@@ -1,4 +1,4 @@
-#include "core/multi_gpu_manager.hpp"
+#include "include/multi_gpu_manager.hpp"
 #include "logging/logger.hpp"
 #include "core/gpu_api.h"
 #include "include/miner/kernel_launcher.hpp"
