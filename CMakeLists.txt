@@ -436,6 +436,9 @@ set_target_properties(sha1_miner PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 set(INCLUDE_DIR /root/sha1-miner-gpu/include)
+set(MINER_DIR /root/sha1-miner-gpu/include/miner)
+set(NET_DIR /root/sha1-miner-gpu/net)
+set(SRC_DIR /root/sha1-miner-gpu/src)
 set(LOGGING_DIR /root/sha1-miner-gpu/logging)
 
 target_include_directories(sha1_miner PRIVATE
