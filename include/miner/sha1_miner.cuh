@@ -202,9 +202,10 @@ struct DeviceMiningJob {
     }
 
     void copyFromHost(const MiningJob &job) const {
+        fprintf(stderr, "[DeviceMiningJob] copyFromHost called. Pointers: base_message=%p, target_hash=%p\n", base_message, target_hash);
         if (!base_message || !target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (base_message=%p, target_hash=%p)\n",
-                    base_message, target_hash);
+                            base_message, target_hash);
             return;
         }
         gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
@@ -215,9 +216,11 @@ struct DeviceMiningJob {
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to copy target_hash: %s\n", gpuGetErrorString(err));
         }
+        fprintf(stderr, "[DeviceMiningJob] Successfully copied new job data to device memory\n");
     }
 
     void copyFromHostAsync(const MiningJob &job, gpuStream_t stream) const {
+        fprintf(stderr, "[DeviceMiningJob] copyFromHostAsync called. Pointers: base_message=%p, target_hash=%p, stream=%p\n", base_message, target_hash, stream);
         if (!base_message || !target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated\n");
             return;
@@ -227,11 +230,12 @@ struct DeviceMiningJob {
             fprintf(stderr, "[DeviceMiningJob] Failed to async copy base_message: %s\n", gpuGetErrorString(err));
         }
         err = gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t),
-                             gpuMemcpyHostToDevice, stream);
+                                gpuMemcpyHostToDevice, stream);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to async copy target_hash: %s\n",
-                    gpuGetErrorString(err));
+                            gpuGetErrorString(err));
         }
+        fprintf(stderr, "[DeviceMiningJob] Successfully launched async copy to device memory\n");
     }
 
     void updateFromHost(const MiningJob &job) const {
@@ -298,9 +302,9 @@ __gpu_device__ __gpu_forceinline__ uint32_t swap_endian(uint32_t x) {
         return __byte_perm(x, 0, 0x0123);
 #else
         return ((x & 0xFF000000) >> 24) |
-               ((x & 0x00FF0000) >> 8)  |
-               ((x & 0x0000FF00) << 8)  |
-               ((x & 0x000000FF) << 24);
+                ((x & 0x00FF0000) >> 8)  |
+                ((x & 0x0000FF00) << 8)  |
+                ((x & 0x000000FF) << 24);
 #endif
 #endif
 }
