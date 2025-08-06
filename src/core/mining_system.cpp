@@ -11,7 +11,7 @@
 #include <iomanip>
 
 // Assuming these are defined elsewhere
-#include "mining_system.h"
+#include "mining_system.hpp"
 #include "gpu_api.h" // Hypothetical header for gpu-related functions
 #include "logging/logger.hpp" // Hypothetical logging header
 
