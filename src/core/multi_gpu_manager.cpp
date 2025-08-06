@@ -1,14 +1,17 @@
-#include "multi_gpu_manager.hpp"
+#include "include/multi_gpu_manager.hpp"
+#include "logging/logger.hpp"
+#include "core/gpu_api.h"
+#include "include/miner/kernel_launcher.hpp"
 #ifdef USE_HIP
 #include "architecture/gpu_architecture.hpp"
 #endif
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
-#include <cmath> // For std::pow
+#include <cmath>
+#include <thread>
 
 #include "config_utils.hpp"
-#include "logger/logging.hpp"
 
 // Define a safe sleep duration to prevent a hard spin
 constexpr std::chrono::milliseconds WORKER_THREAD_SLEEP_MS = std::chrono::milliseconds(5);
@@ -21,13 +24,18 @@ MultiGPUManager::MultiGPUManager()
 
 MultiGPUManager::~MultiGPUManager()
 {
-    // The destructor should always call stopMining to ensure threads are joined
     stopMining();
 }
 
 // Private helper to print GPU properties and check for compatibility issues
 bool MultiGPUManager::logAndCheckGpu(int gpu_id, const gpuDeviceProp &props)
 {
+    gpuError_t err = gpuSetDevice(gpu_id);
+    if (err != gpuSuccess) {
+        LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", gpu_id, ": ", gpuGetErrorString(err));
+        return false;
+    }
+
     std::cout << "\nInitializing GPU " << gpu_id << ": " << props.name << "\n";
 #ifdef USE_HIP
     // AMD-specific initialization
@@ -41,7 +49,6 @@ bool MultiGPUManager::logAndCheckGpu(int gpu_id, const gpuDeviceProp &props)
 
     if (AMDGPUDetector::hasKnownIssues(arch, props.name)) {
         LOG_WARN("MULTI_GPU", "GPU ", gpu_id, " has known compatibility issues.");
-        // Check ROCm version
         int version;
         if (hipRuntimeGetVersion(&version) == hipSuccess) {
             int major = version / 10000000;
@@ -62,11 +69,17 @@ bool MultiGPUManager::logAndCheckGpu(int gpu_id, const gpuDeviceProp &props)
 // Private helper to create and initialize the MiningSystem for a worker
 bool MultiGPUManager::createWorker(int gpu_id)
 {
+    gpuError_t err = gpuSetDevice(gpu_id);
+    if (err != gpuSuccess) {
+        LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", gpu_id, ": ", gpuGetErrorString(err));
+        return false;
+    }
+
     auto worker = std::make_unique<GPUWorker>();
     worker->device_id = gpu_id;
 
     gpuDeviceProp props;
-    gpuError_t err = gpuGetDeviceProperties(&props, gpu_id);
+    err = gpuGetDeviceProperties(&props, gpu_id);
     if (err != gpuSuccess) {
         LOG_ERROR("MULTI_GPU", "Failed to get properties for GPU ", gpu_id, ": ", gpuGetErrorString(err));
         return false;
@@ -82,11 +95,9 @@ bool MultiGPUManager::createWorker(int gpu_id)
 
     // Apply user config if available
     if (user_config_) {
-        // Cast to MiningConfig and apply settings
         auto mining_config = static_cast<const MiningConfig *>(user_config_);
         ConfigUtils::applyMiningConfig(*mining_config, config);
     } else {
-        // Default values if no user config
         config.num_streams = 8;
         config.threads_per_block = DEFAULT_THREADS_PER_BLOCK;
         config.use_pinned_memory = true;
@@ -121,7 +132,9 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids)
     std::cout << "=====================================\n";
 
     for (int gpu_id : gpu_ids) {
-        createWorker(gpu_id);
+        if (!createWorker(gpu_id)) {
+            LOG_ERROR("MULTI_GPU", "Failed to create worker for GPU ", gpu_id);
+        }
     }
 
     if (workers_.empty()) {
@@ -143,22 +156,18 @@ void MultiGPUManager::stopMining()
 
     LOG_INFO("MULTI_GPU", "Stopping all mining operations...");
 
-    // Signal shutdown
     shutdown_ = true;
 
-    // Stop all worker mining systems gracefully
     for (auto &worker : workers_) {
         if (worker->mining_system) {
             worker->mining_system->stopMining();
         }
     }
 
-    // Wait for monitor thread to finish
     if (monitor_thread_ && monitor_thread_->joinable()) {
         monitor_thread_->join();
     }
 
-    // Wait for all worker threads to finish
     waitForWorkers();
 
     LOG_INFO("MULTI_GPU", "All mining operations stopped");
@@ -181,19 +190,21 @@ uint64_t MultiGPUManager::getNextNonceBatch()
 
 void MultiGPUManager::processWorkerResults(GPUWorker *worker, const std::vector<MiningResult> &results)
 {
-    // Update worker stats
+    gpuError_t err = gpuSetDevice(worker->device_id);
+    if (err != gpuSuccess) {
+        LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+        return;
+    }
+
     worker->candidates_found += results.size();
 
-    // Check for new best
     for (const auto &result : results) {
         if (result.matching_bits > worker->best_match_bits) {
             worker->best_match_bits = result.matching_bits;
 
-            // Check if this is a global best
             if (global_best_tracker_.isNewBest(result.matching_bits)) {
                 std::lock_guard lock(stats_mutex_);
-                auto elapsed =
-                    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
 
                 std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() << "s\n";
                 std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
@@ -209,18 +220,14 @@ void MultiGPUManager::processWorkerResults(GPUWorker *worker, const std::vector<
         }
     }
 
-    // Forward to global callback
-    {
-        std::lock_guard lock(callback_mutex_);
-        if (result_callback_) {
-            result_callback_(results);
-        }
+    std::lock_guard lock(callback_mutex_);
+    if (result_callback_) {
+        result_callback_(results);
     }
 }
 
 void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
 {
-    // Set GPU context for this thread
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
         LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Failed to set device context: ", gpuGetErrorString(err));
@@ -230,48 +237,36 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
     LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread started");
     worker->active = true;
 
-    // Set result callback
     auto worker_callback = [this, worker](const std::vector<MiningResult> &results) {
         processWorkerResults(worker, results);
     };
     worker->mining_system->setResultCallback(worker_callback);
 
-    // Error handling
     int consecutive_errors = 0;
     const int max_consecutive_errors = 5;
-
-    // Get initial nonce batch
     uint64_t current_nonce_base = getNextNonceBatch();
     uint64_t nonces_used_in_batch = 0;
 
-    // Run until shutdown
     while (!shutdown_ && consecutive_errors < max_consecutive_errors) {
         try {
-            // Create job with current nonce offset
             MiningJob worker_job = job;
             worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
 
-            // Run a single kernel batch
             uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
 
             if (hashes_this_round == 0) {
-                // Fallback estimation
                 auto config = worker->mining_system->getConfig();
-                hashes_this_round =
-                    static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block * NONCES_PER_THREAD;
+                hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block * NONCES_PER_THREAD;
             }
 
-            // Update stats
             worker->hashes_computed += hashes_this_round;
             nonces_used_in_batch += hashes_this_round;
 
-            // Check if we need a new nonce batch
             if (nonces_used_in_batch >= NONCE_BATCH_SIZE) {
                 current_nonce_base = getNextNonceBatch();
                 nonces_used_in_batch = 0;
             }
 
-            // Reset error counter on success
             consecutive_errors = 0;
         } catch (const std::exception &e) {
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
@@ -279,7 +274,6 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        // Small delay to prevent CPU spinning
         std::this_thread::sleep_for(WORKER_THREAD_SLEEP_MS);
     }
 
@@ -288,10 +282,8 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
 }
 
 void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, const MiningJob &job,
-    std::function<bool()> should_continue,
-    std::atomic<uint64_t> &shared_nonce_counter)
+    std::function<bool()> should_continue, std::atomic<uint64_t> &shared_nonce_counter)
 {
-    // Set GPU context for this thread
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
         LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Failed to set device context: ", gpuGetErrorString(err));
@@ -301,26 +293,21 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread started (continuous nonce mode)");
     worker->active = true;
 
-    // Set result callback
     auto worker_callback = [this, worker](const std::vector<MiningResult> &results) {
         processWorkerResults(worker, results);
     };
     worker->mining_system->setResultCallback(worker_callback);
 
-    // Error handling
     int consecutive_errors = 0;
     const int max_consecutive_errors = 5;
-
     const uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
 
     while (!shutdown_ && consecutive_errors < max_consecutive_errors && should_continue()) {
         try {
-            // Atomically get next nonce batch from shared counter
             uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
 
             LOG_TRACE("MULTI_GPU", "GPU ", worker->device_id, " - Got nonce batch starting at: ", batch_start);
 
-            // Create job with this GPU's nonce batch
             MiningJob worker_job = job;
             worker_job.nonce_offset = batch_start;
 
@@ -328,7 +315,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             uint64_t nonces_processed = 0;
 
             const uint64_t chunk_size = gpu_batch_size / 10;
-            if (chunk_size == 0) { // Avoid division by zero with small batches
+            if (chunk_size == 0) {
                 nonces_to_process = 1;
             }
 
@@ -338,8 +325,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
 
                 if (hashes_this_round == 0) {
                     auto config = worker->mining_system->getConfig();
-                    hashes_this_round =
-                        static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block * NONCES_PER_THREAD;
+                    hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block * NONCES_PER_THREAD;
                 }
 
                 worker->hashes_computed += hashes_this_round;
@@ -372,7 +358,8 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     }
 }
 
-void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
+void MultiGPUManager::monitorThread(std::function<bool()> should_continue)
+{
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_total_hashes = 0;
 
@@ -442,6 +429,11 @@ void MultiGPUManager::runMining(const MiningJob &job)
     global_best_tracker_.reset();
 
     for (auto &worker : workers_) {
+        gpuError_t err = gpuSetDevice(worker->device_id);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+            continue;
+        }
         worker->hashes_computed = 0;
         worker->candidates_found = 0;
         worker->best_match_bits = 0;
@@ -451,12 +443,10 @@ void MultiGPUManager::runMining(const MiningJob &job)
         worker->worker_thread = std::make_unique<std::thread>(&MultiGPUManager::workerThread, this, worker.get(), job);
     }
 
-    // Start monitor thread
     monitor_thread_ = std::make_unique<std::thread>(
         &MultiGPUManager::monitorThread, this, []() { return true; }
     );
 
-    // Wait for shutdown signal
     waitForWorkers();
 
     if (monitor_thread_ && monitor_thread_->joinable()) {
@@ -473,6 +463,11 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job, std
     global_best_tracker_.reset();
 
     for (auto &worker : workers_) {
+        gpuError_t err = gpuSetDevice(worker->device_id);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+            continue;
+        }
         worker->hashes_computed = 0;
         worker->candidates_found = 0;
         worker->best_match_bits = 0;
@@ -486,7 +481,6 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job, std
                                          job, should_continue, std::ref(global_nonce_offset));
     }
 
-    // Start monitor thread
     monitor_thread_ = std::make_unique<std::thread>(
         &MultiGPUManager::monitorThread, this, should_continue
     );
@@ -507,6 +501,11 @@ void MultiGPUManager::sync() const
 {
     for (const auto &worker : workers_) {
         if (worker->mining_system && worker->active) {
+            gpuError_t err = gpuSetDevice(worker->device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+                continue;
+            }
             worker->mining_system->sync();
         }
     }
@@ -516,6 +515,11 @@ void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version) 
 {
     for (const auto &worker : workers_) {
         if (worker->mining_system && worker->active) {
+            gpuError_t err = gpuSetDevice(worker->device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+                continue;
+            }
             worker->mining_system->updateJobLive(job, job_version);
         }
     }
