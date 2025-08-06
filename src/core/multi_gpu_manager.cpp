@@ -2,6 +2,7 @@
 #include "logging/logger.hpp"
 #include "core/gpu_api.h"
 #include "include/miner/kernel_launcher.hpp"
+#include "core/mining_system.hpp"
 #ifdef USE_HIP
 #include "architecture/gpu_architecture.hpp"
 #endif
@@ -102,6 +103,7 @@ bool MultiGPUManager::createWorker(int gpu_id)
         config.threads_per_block = DEFAULT_THREADS_PER_BLOCK;
         config.use_pinned_memory = true;
         config.result_buffer_size = 1024;
+        config.blocks_per_stream = 1024; // Default value, adjust as needed
     }
 
     // Create and initialize mining system
@@ -160,6 +162,11 @@ void MultiGPUManager::stopMining()
 
     for (auto &worker : workers_) {
         if (worker->mining_system) {
+            gpuError_t err = gpuSetDevice(worker->device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("MULTI_GPU", "Failed to set device context for GPU ", worker->device_id, ": ", gpuGetErrorString(err));
+                continue;
+            }
             worker->mining_system->stopMining();
         }
     }
