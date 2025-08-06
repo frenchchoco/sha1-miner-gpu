@@ -11,9 +11,13 @@
 #include <iomanip>
 
 // Assuming these are defined elsewhere
-#include "mining_system.hpp"
-#include "gpu_api.h" // Hypothetical header for gpu-related functions
-#include "logging/logger.hpp" // Hypothetical logging header
+#include "core/mining_system.hpp"
+#include "logging/logger.hpp"
+#include "core/gpu_api.h"
+#include "sha1_miner.cuh"
+#ifdef USE_HIP
+#include "architecture/gpu_architecture.hpp"
+#endif
 
 // Global shutdown flag
 std::atomic<bool> g_shutdown(false);
