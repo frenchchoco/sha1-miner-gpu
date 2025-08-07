@@ -27,18 +27,15 @@ namespace MiningPool {
         return result;
     }
 
-    // PoolMiningSystem implementation
     PoolMiningSystem::PoolMiningSystem(Config config) : config_(std::move(config))
     {
-        // Initialize statistics
         stats_                    = {};
-        stats_.current_difficulty = config_.min_share_difficulty;  // Now in BITS
-        stats_.current_bits       = config_.min_share_difficulty;  // Track bits explicitly
-        stats_.best_share_bits    = 0;                             // Track best share
+        stats_.current_difficulty = config_.min_share_difficulty;
+        stats_.current_bits       = config_.min_share_difficulty;
+        stats_.best_share_bits    = 0;
         start_time_               = std::chrono::steady_clock::now();
 
-        // IMPORTANT: Start job version at 0, not implicitly
-        job_version_ = 0;
+        job_version_ = 1;
     }
 
     PoolMiningSystem::~PoolMiningSystem()
@@ -132,8 +129,8 @@ namespace MiningPool {
                 mining_config.device_id = config_.gpu_ids[0];
             }
         } else {
-            // Single GPU specified by ID
-            mining_config.device_id = config_.gpu_id;
+            LOG_WARN("POOL", "No GPU configuration specified, defaulting to GPU 0");
+            return false;
         }
 
         // Initialize single GPU mining system if not using multi-GPU
@@ -176,6 +173,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::share_submission_loop()
     {
+        // Share submission doesn't need GPU context as it only sends network messages
+        LOG_INFO("SHARE_SUBMIT", "Share submission loop started");
         while (running_.load()) {
             std::unique_lock lock(share_mutex_);
             share_cv_.wait_for(lock, std::chrono::seconds(1),
@@ -199,6 +198,8 @@ namespace MiningPool {
                 lock.lock();
             }
         }
+
+        LOG_INFO("SHARE_SUBMIT", "Share submission loop stopped");
     }
 
     void PoolMiningSystem::stop()
@@ -247,6 +248,35 @@ namespace MiningPool {
     void PoolMiningSystem::mining_loop()
     {
         LOG_INFO("MINING", "Mining loop started");
+        // CRITICAL: Get the correct GPU device ID
+        int device_id = 0;
+        if (multi_gpu_manager_) {
+            // For multi-GPU, each worker thread handles its own context
+            // We don't need to set it here
+            LOG_INFO("MINING", "Using multi-GPU manager, context handled by workers");
+        } else if (mining_system_) {
+            // Get device ID from the mining system's config
+            device_id = mining_system_->getConfig().device_id;
+        } else if (!config_.gpu_ids.empty()) {
+            // Use first GPU from the list
+            device_id = config_.gpu_ids[0];
+        }
+        // Only set GPU context if not using multi-GPU manager
+        if (!multi_gpu_manager_) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("MINING", "Failed to set GPU device ", device_id,
+                          " in mining thread: ", gpuGetErrorString(err));
+                return;
+            }
+            // Synchronize to ensure device is ready
+            err = gpuDeviceSynchronize();
+            if (err != gpuSuccess) {
+                LOG_ERROR("MINING", "Device ", device_id, " not ready in mining thread: ", gpuGetErrorString(err));
+                return;
+            }
+            LOG_INFO("MINING", "Mining thread GPU context set to device ", device_id);
+        }
 
         while (running_.load()) {
             // Wait for a job to be available
@@ -272,6 +302,21 @@ namespace MiningPool {
             uint64_t mining_job_version = job_version_.load();
 
             try {
+                // Verify GPU context if not using multi-GPU
+                if (!multi_gpu_manager_) {
+                    int current_device;
+                    gpuGetDevice(&current_device);
+                    if (current_device != device_id) {
+                        LOG_WARN("MINING", "GPU context switched from ", device_id, " to ", current_device,
+                                 ", resetting");
+                        gpuError_t err = gpuSetDevice(device_id);
+                        if (err != gpuSuccess) {
+                            LOG_ERROR("MINING", "Failed to reset GPU context to device ", device_id, ": ",
+                                      gpuGetErrorString(err));
+                            continue;
+                        }
+                    }
+                }
                 // Get current job data and version
                 MiningJob job_copy{};
                 {
@@ -281,6 +326,20 @@ namespace MiningPool {
                         continue;
                     }
                     job_copy = *current_mining_job_;
+                }
+
+                // CRITICAL FIX: Ensure job version is set BEFORE starting mining
+                LOG_INFO("MINING", "Setting job version ", mining_job_version, " before starting mining");
+
+                if (multi_gpu_manager_) {
+                    // Update job with version BEFORE running
+                    multi_gpu_manager_->updateJobLive(job_copy, mining_job_version);
+                    // Give it a moment to propagate to all GPUs
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                } else if (mining_system_) {
+                    // Update job with version BEFORE running
+                    mining_system_->updateJobLive(job_copy, mining_job_version);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
 
                 // Create a condition function that ALSO checks if job version changed
@@ -299,23 +358,20 @@ namespace MiningPool {
                 LOG_INFO("MINING", "Starting mining with job version ", mining_job_version, " from nonce offset ",
                          starting_nonce);
 
-                // CRITICAL: Update the job with the correct version BEFORE starting mining
+                // CRITICAL: DO NOT update job version again - it's already set above
                 uint64_t final_nonce = starting_nonce;
 
                 if (multi_gpu_manager_) {
-                    multi_gpu_manager_->updateJobLive(job_copy, mining_job_version);
-                    // Pass the global nonce offset atomic reference
+                    LOG_INFO("MINING", "Multi-GPU mining starting from global nonce: ", global_nonce_offset_.load());
                     multi_gpu_manager_->runMiningInterruptibleWithOffset(job_copy, should_continue,
                                                                          global_nonce_offset_);
-                    // For multi-GPU, the global_nonce_offset_ is updated by the workers directly
+
                     final_nonce = global_nonce_offset_.load();
+                    LOG_INFO("MINING", "Multi-GPU mining stopped at global nonce: ", final_nonce);
                 } else if (mining_system_) {
-                    mining_system_->updateJobLive(job_copy, mining_job_version);
-                    // Use the method that returns final nonce
                     final_nonce =
                         mining_system_->runMiningLoopInterruptibleWithOffset(job_copy, should_continue, starting_nonce);
 
-                    // CRITICAL: Update global offset with where we stopped
                     global_nonce_offset_.store(final_nonce);
                 }
 
@@ -323,6 +379,15 @@ namespace MiningPool {
                           final_nonce);
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
+
+                // On error, try to recover by resetting GPU context (only if not multi-GPU)
+                if (!multi_gpu_manager_) {
+                    gpuSetDevice(device_id);
+                    gpuGetLastError();  // Clear any errors
+                }
+
+                // Small delay before retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             // If we exit the mining loop (due to job change or disconnect),
@@ -345,6 +410,31 @@ namespace MiningPool {
     void PoolMiningSystem::share_scanner_loop()
     {
         LOG_INFO("SCANNER", "Share scanner loop started");
+        // Get the correct GPU device ID
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (multi_gpu_manager_) {
+            // Multi-GPU manager handles contexts
+            LOG_INFO("SCANNER", "Using multi-GPU manager, context handled by workers");
+        } else if (mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+        // Set GPU context if needed
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("SCANNER", "Failed to set GPU device ", device_id,
+                          " in scanner thread: ", gpuGetErrorString(err));
+                return;
+            }
+
+            LOG_INFO("SCANNER", "Scanner thread GPU context set to device ", device_id);
+        }
+
         while (running_.load()) {
             {
                 std::unique_lock lock(results_mutex_);
@@ -368,6 +458,27 @@ namespace MiningPool {
 
     void PoolMiningSystem::stats_reporter_loop()
     {
+        // Stats reporter might need GPU context for temperature monitoring in the future
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (!multi_gpu_manager_ && mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!multi_gpu_manager_ && !config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("STATS", "Failed to set GPU device ", device_id,
+                          " in stats thread: ", gpuGetErrorString(err));
+            } else {
+                LOG_INFO("STATS", "Stats thread GPU context set to device ", device_id);
+            }
+        }
+
         auto last_hashrate_report  = std::chrono::steady_clock::now();
         auto last_difficulty_check = std::chrono::steady_clock::now();
 
@@ -380,35 +491,46 @@ namespace MiningPool {
 
             auto now = std::chrono::steady_clock::now();
 
+            // Update internal stats BEFORE reporting
+            update_stats();
+
             // Report hashrate periodically
             if (now - last_hashrate_report >= std::chrono::seconds(30)) {
                 last_hashrate_report = now;
 
                 HashrateReportMessage report;
 
-                // Get mining stats
-                if (multi_gpu_manager_) {
-                    // Get stats from multi-GPU - need to calculate from elapsed time
-                    if (auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
-                        elapsed.count() > 0) {
-                        report.hashrate = stats_.hashrate;  // Updated by update_stats()
+                // Get current stats (which were just updated)
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    report.hashrate = stats_.hashrate;
+                    if (multi_gpu_manager_) {
+                        // Get GPU count from config or device count
+                        if (!config_.gpu_ids.empty()) {
+                            report.gpu_count = config_.gpu_ids.size();
+                        } else if (config_.use_all_gpus) {
+                            // Count all available GPUs
+                            int device_count = 0;
+                            gpuGetDeviceCount(&device_count);
+                            report.gpu_count = device_count;
+                        } else {
+                            report.gpu_count = 1;  // Default
+                        }
+                    } else {
+                        report.gpu_count = 1;
                     }
-                    report.gpu_count = config_.gpu_ids.empty() ? 1 : config_.gpu_ids.size();
-                } else if (mining_system_) {
-                    const auto mining_stats = mining_system_->getStats();
-                    report.hashrate         = mining_stats.hash_rate;
-                    report.gpu_count        = 1;
+                    report.shares_submitted = stats_.shares_submitted;
+                    report.shares_accepted  = stats_.shares_accepted;
                 }
-
-                report.shares_submitted = stats_.shares_submitted;
-                report.shares_accepted  = stats_.shares_accepted;
-                report.uptime_seconds   = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+                report.uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
 
                 // Add GPU stats
                 nlohmann::json gpu_stats;
-                if (multi_gpu_manager_) {
+                if (multi_gpu_manager_ && report.gpu_count > 0) {
+                    // Distribute hashrate across GPUs for reporting
+                    double per_gpu_hashrate = report.hashrate / report.gpu_count;
                     for (uint32_t i = 0; i < report.gpu_count; i++) {
-                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"]    = report.hashrate / report.gpu_count;
+                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"]    = per_gpu_hashrate;
                         gpu_stats["gpu_" + std::to_string(i)]["temperature"] = 0;  // TODO: Add temp monitoring
                     }
                 } else {
@@ -416,6 +538,9 @@ namespace MiningPool {
                     gpu_stats["gpu_0"]["temperature"] = 0;  // TODO: Add temp monitoring
                 }
                 report.gpu_stats = gpu_stats;
+
+                LOG_DEBUG("STATS", "Reporting hashrate: ", report.hashrate / 1e9, " GH/s across ", report.gpu_count,
+                          " GPUs");
 
                 pool_client_->report_hashrate(report);
             }
@@ -425,9 +550,6 @@ namespace MiningPool {
                 last_difficulty_check = now;
                 adjust_local_difficulty();
             }
-
-            // Update internal stats
-            update_stats();
         }
     }
 
@@ -564,13 +686,18 @@ namespace MiningPool {
         }
 
         LOG_DEBUG("SHARE", "Current job: ", current_job_id, ", requires difficulty: ", current_job_difficulty,
-                  ", version: ", expected_job_version, "results: ", results.size());
+                  ", version: ", expected_job_version, ", results: ", results.size());
 
         // Filter results based on current job difficulty and version
         std::vector<MiningResult> filtered_results;
         int version_mismatches = 0;
+        int low_difficulty     = 0;
 
         for (const auto &result : results) {
+            // Debug log for each result
+            LOG_TRACE("SHARE", "Result: nonce=0x", std::hex, result.nonce, std::dec, ", bits=", result.matching_bits,
+                      ", job_version=", result.job_version, " (expected=", expected_job_version, ")");
+
             // Check job version to avoid stale shares
             if (result.job_version != expected_job_version) {
                 version_mismatches++;
@@ -581,10 +708,11 @@ namespace MiningPool {
 
             if (result.matching_bits >= current_job_difficulty) {
                 filtered_results.push_back(result);
-                LOG_DEBUG("SHARE", "Result meets difficulty: ", result.matching_bits, " bits, nonce: 0x", std::hex,
-                          result.nonce, std::dec, ", version: ", result.job_version);
+                LOG_INFO("SHARE", "Result meets difficulty: ", result.matching_bits, " bits, nonce: 0x", std::hex,
+                         result.nonce, std::dec, ", version: ", result.job_version);
             } else {
-                LOG_DEBUG("SHARE", "Result does not meet difficulty: ", result.matching_bits,
+                low_difficulty++;
+                LOG_TRACE("SHARE", "Result does not meet difficulty: ", result.matching_bits,
                           " bits (required: ", current_job_difficulty, ")");
             }
         }
@@ -593,9 +721,13 @@ namespace MiningPool {
             LOG_WARN("SHARE", "Discarded ", version_mismatches, " results with wrong job version");
         }
 
+        if (low_difficulty > 0) {
+            LOG_DEBUG("SHARE", "Discarded ", low_difficulty, " results below difficulty threshold");
+        }
+
         if (!filtered_results.empty()) {
-            LOG_DEBUG("SHARE", "Found ", filtered_results.size(), " results meeting difficulty ",
-                      current_job_difficulty, " (out of ", results.size(), " total)");
+            LOG_INFO("SHARE", "Found ", filtered_results.size(), " results meeting difficulty ", current_job_difficulty,
+                     " (out of ", results.size(), " total)");
 
             // Use double buffer to avoid race conditions
             {
@@ -715,8 +847,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::update_mining_job(const PoolJob &pool_job)
     {
-        // Increment job version
-        const uint64_t new_version = job_version_.fetch_add(1) + 1;
+        // DON'T increment job version here - it should already be set by on_new_job
+        uint64_t new_version = job_version_.load();
 
         // Create new mining job
         MiningJob new_mining_job = convert_to_mining_job(pool_job.job_data);
@@ -749,6 +881,13 @@ namespace MiningPool {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
+        // CRITICAL: Update job version in mining systems BEFORE updating job data
+        if (multi_gpu_manager_) {
+            multi_gpu_manager_->updateJobLive(new_mining_job, new_version);
+        } else if (mining_system_) {
+            mining_system_->updateJobLive(new_mining_job, new_version);
+        }
+
         // Update job data atomically
         {
             std::lock_guard lock(job_mutex_);
@@ -776,7 +915,7 @@ namespace MiningPool {
             current_job_id_for_mining_ = pool_job.job_id;
             current_difficulty_        = pool_job.job_data.target_difficulty;
 
-            LOG_DEBUG("POOL", "Job data updated to ", pool_job.job_id, " with version ", new_version);
+            LOG_INFO("POOL", "Job data updated to ", pool_job.job_id, " with version ", new_version);
         }
 
         // Clear GPU state if we have a mining system
@@ -830,14 +969,16 @@ namespace MiningPool {
     void PoolMiningSystem::update_stats()
     {
         std::lock_guard lock(stats_mutex_);
+
         if (mining_system_) {
+            // Single GPU - get stats directly
             const auto mining_stats = mining_system_->getStats();
             stats_.hashrate         = mining_stats.hash_rate;
             stats_.total_hashes     = mining_stats.hashes_computed;
         } else if (multi_gpu_manager_) {
-            stats_.hashrate = multi_gpu_manager_->getTotalHashRate();
-            // For multi-GPU, estimate total hashes from nonce progress
-            stats_.total_hashes = global_nonce_offset_.load() - 1;
+            // Multi-GPU - use the corrected getTotalHashRate()
+            stats_.hashrate     = multi_gpu_manager_->getTotalHashRate();
+            stats_.total_hashes = multi_gpu_manager_->getTotalHashes();
         }
 
         // Update current difficulty from the actual job
@@ -860,7 +1001,6 @@ namespace MiningPool {
             current_nonce - last_logged_nonce > 1000000000) {
             // Log every billion nonces
             LOG_DEBUG("POOL", "Nonce progress: ", current_nonce, " (", (current_nonce / 1000000000.0), " billion)");
-
             last_logged_nonce = current_nonce;
         }
     }
@@ -975,26 +1115,32 @@ namespace MiningPool {
             }
         }
 
-        // Always treat pool jobs as clean jobs that require full restart
-        // BUT we keep the nonce position!
-        if (mining_active_.load()) {
-            LOG_DEBUG("POOL", "Stopping mining for new job (nonce will continue from ", global_nonce_offset_.load(),
-                      ")");
+        // Increment job version for new job
+        uint64_t new_version = job_version_.fetch_add(1);
+        LOG_INFO("POOL", "Incremented job version to: ", new_version);
 
-            // Stop mining
+        // Stop mining if active
+        if (mining_active_.load()) {
+            LOG_DEBUG("POOL", "Stopping mining for new job");
             mining_active_ = false;
 
-            // Stop GPU mining immediately
+            // Stop GPU mining immediately and wait for it to actually stop
             if (multi_gpu_manager_) {
                 multi_gpu_manager_->stopMining();
                 multi_gpu_manager_->sync();
+                // Ensure all workers have the new job version
+                MiningJob temp_job{};
+                multi_gpu_manager_->updateJobLive(temp_job, new_version);
             } else if (mining_system_) {
                 mining_system_->stopMining();
                 mining_system_->sync();
+                // Ensure the system has the new job version
+                MiningJob temp_job{};
+                mining_system_->updateJobLive(temp_job, new_version);
             }
 
-            // Wait for mining to fully stop
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            // Wait longer to ensure mining fully stops
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
         // Update the job
@@ -1171,9 +1317,9 @@ namespace MiningPool {
     {
         std::lock_guard lock(mutex_);
 
-        const auto it = std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
-
-        if (it != pools_.end()) {
+        if (const auto it =
+                std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
+            it != pools_.end()) {
             it->enabled = enable;
         }
     }

@@ -73,7 +73,7 @@ public:
      * @param should_continue Function that returns false when mining should stop
      * @param global_nonce_offset Atomic nonce offset shared across all GPUs
      */
-    void runMiningInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
+    void runMiningInterruptibleWithOffset(const MiningJob &job, const std::function<bool()> &should_continue,
                                           std::atomic<uint64_t> &global_nonce_offset);
 
     /**
@@ -102,6 +102,8 @@ public:
      * Get number of active workers
      */
     size_t getActiveWorkerCount() const;
+
+    uint64_t getTotalHashes() const;
 
 private:
     const void *user_config_ = nullptr;
@@ -136,13 +138,14 @@ private:
     uint64_t getNextNonceBatch();
 
     // Process results from a worker
-    void processWorkerResults(GPUWorker *worker, const std::vector<MiningResult> &results);
+    void processWorkerResults(GPUWorker *worker, const std::vector<MiningResult> &results) const;
 
     // Check if all workers are ready
     bool allWorkersReady() const;
 
     // Wait for workers to finish
-    void waitForWorkers();
+    void waitForWorkers() const;
+    void waitForWorkersWithTimeout(std::chrono::seconds timeout) const;
 };
 
 #endif  // MULTI_GPU_MANAGER_HPP
