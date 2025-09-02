@@ -11,6 +11,12 @@
 #include "config.hpp"
 #include "utilities.hpp"
 
+#ifdef USE_HIP
+extern "C" void update_base_message_hip(const uint32_t *base_msg_words);
+#else
+extern "C" void update_base_message_cuda(const uint32_t *base_msg_words);
+#endif
+
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
 
@@ -62,7 +68,9 @@ void MiningSystem::TimingStats::print() const
 // MiningSystem implementation
 MiningSystem::MiningSystem(const Config &config)
     : config_(config), device_props_(), gpu_vendor_(GPUVendor::UNKNOWN), best_tracker_()
-{}
+{
+    hashrate_start_time_ = std::chrono::steady_clock::now();
+}
 
 MiningSystem::~MiningSystem()
 {
@@ -641,6 +649,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
     // Reset flags and counters
     stop_mining_ = false;
     best_tracker_.reset();
+    start_time_   = std::chrono::steady_clock::now();
     total_hashes_ = 0;
     clearResults();
 
@@ -653,9 +662,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
 
     for (int i = 0; i < config_.num_streams; i++) {
         gpuEventCreateWithFlags(&kernel_complete_events_[i], gpuEventDisableTiming);
-        stream_data[i].last_nonces_processed = 0;
-        stream_data[i].busy                  = false;
-        gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+        stream_data[i].busy = false;
     }
 
     // Nonce distribution - START FROM PROVIDED OFFSET
@@ -672,6 +679,9 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         global_nonce_offset += nonce_stride;
     }
 
+    int launch_count      = 0;
+    const auto loop_start = std::chrono::high_resolution_clock::now();
+
     // Main mining loop
     while (!g_shutdown && !stop_mining_ && should_continue()) {
         // Check for completed kernels using events
@@ -679,11 +689,11 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         int completed_stream = -1;
 
         for (int i = 0; i < config_.num_streams; i++) {
-            if (!stream_data[i].busy)
+            if (!stream_data[i].busy) {
                 continue;
+            }
 
-            gpuError_t status = gpuEventQuery(kernel_complete_events_[i]);
-            if (status == gpuSuccess) {
+            if (const gpuError_t status = gpuEventQuery(kernel_complete_events_[i]); status == gpuSuccess) {
                 completed_stream = i;
                 found_completed  = true;
                 break;
@@ -691,7 +701,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         }
 
         if (!found_completed) {
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
             continue;
         }
 
@@ -707,6 +717,16 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
 
         // Launch new work on this stream
         launchKernelOnStream(completed_stream, global_nonce_offset, job);
+
+        launch_count++;
+        if (launch_count % 100 == 0) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::high_resolution_clock::now() - loop_start)
+                                        .count();
+            LOG_INFO("MINING", "Launched ", launch_count, " kernels in ", elapsed_ms, " ms (", std::fixed,
+                     std::setprecision(1), (launch_count * 1000.0) / elapsed_ms, " launches/sec)");
+        }
+
         stream_data[completed_stream].nonce_offset = global_nonce_offset;
         stream_data[completed_stream].busy         = true;
         global_nonce_offset += nonce_stride;
@@ -750,9 +770,29 @@ void MiningSystem::runMiningLoop(const MiningJob &job)
     runMiningLoopInterruptibleWithOffset(job, []() { return !g_shutdown; }, 1);
 }
 
-// Update launchKernelOnStream to NOT modify global_nonce_offset
 void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t nonce_offset, const MiningJob &job)
 {
+    // Use a static atomic with proper initialization
+    static std::atomic<uint64_t> last_updated_job_version{UINT64_MAX};
+    // Load the current value for comparison
+    uint64_t last_version    = last_updated_job_version.load();
+    uint64_t current_version = current_job_version_.load();
+    if (current_version != last_version) {
+        uint32_t base_msg_words[8];
+        memcpy(base_msg_words, job.base_message, 32);
+
+// Copy to constant memory using platform-specific wrapper
+#ifdef USE_HIP
+        update_base_message_hip(base_msg_words);
+#else
+        update_base_message_cuda(base_msg_words);
+#endif
+
+        // Store the new version
+        last_updated_job_version.store(current_version);
+        LOG_TRACE("MINING", "Updated constant memory with new base message for job version ", current_version);
+    }
+
     // Configure kernel
     KernelConfig config{};
     config.blocks             = config_.blocks_per_stream;
@@ -780,18 +820,10 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
 
 void MiningSystem::processStreamResults(const int stream_idx, StreamData &stream_data)
 {
-    // Get actual nonces processed
-    uint64_t actual_nonces = 0;
-    gpuMemcpyAsync(&actual_nonces, gpu_pools_[stream_idx].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost,
-                   streams_[stream_idx]);
-
-    // Ensure the copy is complete
-    gpuStreamSynchronize(streams_[stream_idx]);
-
-    // Update hash count
-    const uint64_t nonces_this_kernel = actual_nonces - stream_data.last_nonces_processed;
-    total_hashes_ += nonces_this_kernel;
-    stream_data.last_nonces_processed = actual_nonces;
+    // Update both counters
+    uint64_t hashes_this_batch = getHashesPerKernel();
+    total_hashes_ += hashes_this_batch;
+    hashes_since_reset_ += hashes_this_batch;
 
     // Process mining results
     processResultsOptimized(stream_idx);
@@ -846,6 +878,16 @@ bool MiningSystem::validateStreams() const
     return true;
 }
 
+void MiningSystem::resetHashCounter()
+{
+    // Reset hashrate tracking
+    hashes_since_reset_  = 0;
+    hashrate_start_time_ = std::chrono::steady_clock::now();
+
+    // Reset best tracker for new job
+    best_tracker_.reset();
+}
+
 void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
 {
     // Store current job version first
@@ -855,7 +897,6 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device
-        gpuMemcpyAsync(device_jobs_[i].base_message, job.base_message, 32, gpuMemcpyHostToDevice, streams_[i]);
         gpuMemcpyAsync(device_jobs_[i].target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice,
                        streams_[i]);
 
@@ -946,13 +987,6 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
             double hash_rate = static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9;
 
-            // Helper function to pad string to fixed width
-            auto pad_right = [](const std::string &str, size_t width) -> std::string {
-                if (str.length() >= width)
-                    return str;
-                return str + std::string(width - str.length(), ' ');
-            };
-
             // Format all values
             std::string time_str     = std::to_string(elapsed.count()) + "s";
             std::string platform_str = getGPUPlatformName();
@@ -1013,15 +1047,18 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
 MiningStats MiningSystem::getStats() const
 {
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
-
     MiningStats stats{};
     stats.hashes_computed  = total_hashes_.load();
     stats.candidates_found = total_candidates_.load();
     stats.best_match_bits  = best_tracker_.getBestBits();
-    stats.hash_rate =
-        elapsed.count() > 0 ? static_cast<double>(stats.hashes_computed) / static_cast<double>(elapsed.count()) : 0.0;
+    // Calculate hashrate from reset point (for per-job accuracy)
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - hashrate_start_time_);
+    if (elapsed.count() > 0) {
+        stats.hash_rate = static_cast<double>(hashes_since_reset_.load()) / static_cast<double>(elapsed.count());
+    } else {
+        stats.hash_rate = 0.0;
+    }
 
     return stats;
 }
@@ -1122,10 +1159,9 @@ bool MiningSystem::initializeMemoryPools()
         pool.capacity    = config_.result_buffer_size;
 
         // Initialize all pointers to nullptr first
-        pool.results          = nullptr;
-        pool.count            = nullptr;
-        pool.nonces_processed = nullptr;
-        pool.job_version      = nullptr;
+        pool.results     = nullptr;
+        pool.count       = nullptr;
+        pool.job_version = nullptr;
 
         // Check if stream is valid before using it
         if (!streams_[i]) {
@@ -1167,18 +1203,6 @@ bool MiningSystem::initializeMemoryPools()
         err = gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
         if (err != gpuSuccess) {
             std::cerr << "Failed to clear count buffer: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate nonces_processed
-        err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate nonce counter: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-        err = gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear nonce counter: " << gpuGetErrorString(err) << "\n";
             return false;
         }
 
@@ -1235,12 +1259,10 @@ bool MiningSystem::initializeMemoryPools()
 
     // Final validation
     for (int i = 0; i < config_.num_streams; i++) {
-        if (!gpu_pools_[i].count || !gpu_pools_[i].results || !gpu_pools_[i].nonces_processed ||
-            !gpu_pools_[i].job_version) {
+        if (!gpu_pools_[i].count || !gpu_pools_[i].results || !gpu_pools_[i].job_version) {
             std::cerr << "GPU pool " << i << " has null pointers after allocation\n";
             std::cerr << "  count: " << gpu_pools_[i].count << "\n";
             std::cerr << "  results: " << gpu_pools_[i].results << "\n";
-            std::cerr << "  nonces_processed: " << gpu_pools_[i].nonces_processed << "\n";
             std::cerr << "  job_version: " << gpu_pools_[i].job_version << "\n";
             return false;
         }
@@ -1281,8 +1303,6 @@ void MiningSystem::cleanup()
             gpuFree(pool.results);
         if (pool.count)
             gpuFree(pool.count);
-        if (pool.nonces_processed)
-            gpuFree(pool.nonces_processed);
         if (pool.job_version)
             gpuFree(pool.job_version);
     }
@@ -1433,9 +1453,6 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job)
     kernel_config.stream             = streams_[0];  // Use first stream
     kernel_config.shared_memory_size = 0;
 
-    // Reset nonce counter - IMPORTANT!
-    gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
-
     // Launch kernel
     launch_mining_kernel(device_jobs_[0], job.difficulty, job.nonce_offset, gpu_pools_[0], kernel_config,
                          current_job_version_);
@@ -1443,14 +1460,12 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job)
     // Wait for completion
     gpuStreamSynchronize(streams_[0]);
 
-    // Get actual nonces processed
-    uint64_t actual_nonces = 0;
-    gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-
     // Process results
     processResultsOptimized(0);
 
     // Update total hashes with actual count
+    const uint64_t actual_nonces = getHashesPerKernel();
+
     total_hashes_ += actual_nonces;
 
     return actual_nonces;
@@ -1472,12 +1487,9 @@ void MiningSystem::resetState()
 {
     LOG_INFO("RESET", "Resetting mining system state");
 
-    best_tracker_.reset();
-    total_hashes_     = 0;
-    total_candidates_ = 0;
     // current_job_version_ = 0;
     clearResults();
-    start_time_ = std::chrono::steady_clock::now();
+
     // Clear any GPU errors
     gpuGetLastError();
 
@@ -1487,6 +1499,9 @@ void MiningSystem::resetState()
             gpuStreamSynchronize(streams_[i]);
         }
     }
+
+    total_candidates_ = 0;
+    best_tracker_.reset();
 }
 
 extern "C" void cleanup_mining_system()
@@ -1516,7 +1531,7 @@ extern "C" MiningJob create_mining_job(const uint8_t *message, const uint8_t *ta
     return job;
 }
 
-extern "C" void run_mining_loop(MiningJob job)
+extern "C" void run_mining_loop(const MiningJob &job)
 {
     if (!g_mining_system) {
         std::cerr << "Mining system not initialized\n";
