@@ -38,6 +38,7 @@ struct MiningConfig
 
     // Operating modes
     bool benchmark  = false;
+    bool auto_bench = false;  // Run benchmark-based auto-tuning at startup
     bool test_sha1  = false;
     bool debug_mode = false;
     int debug_level = 2;

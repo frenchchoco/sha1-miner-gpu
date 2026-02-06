@@ -37,7 +37,9 @@ po::options_description create_options_description()
             "no-failover", "Disable automatic pool failover")
 
         // Other options
-        ("benchmark", "Run performance benchmark")("test-sha1", "Test SHA-1 implementation")(
+        ("benchmark", "Run performance benchmark")(
+            "auto-bench", "Run benchmark-based auto-tuning at startup (~30-45s, finds optimal GPU params)")(
+            "test-sha1", "Test SHA-1 implementation")(
             "debug", "Enable debug mode")("debug-level", po::value<int>()->default_value(2),
                                           "Debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)")(
             "no-colors", "Disable colored output");
@@ -62,7 +64,10 @@ void print_usage_examples(const char *program_name)
     std::cout << "                    --worker rig1 --streams 8 --threads 256\n\n";
 
     std::cout << "  Benchmark mode:\n";
-    std::cout << "    " << program_name << " --benchmark --gpu 0 --threads 512\n";
+    std::cout << "    " << program_name << " --benchmark --gpu 0 --threads 512\n\n";
+
+    std::cout << "  Auto-bench (find optimal GPU params at startup):\n";
+    std::cout << "    " << program_name << " --auto-bench --pool ws://pool:3333 --wallet YOUR_WALLET\n";
 }
 
 bool MiningConfig::wasUserSpecified(const std::string &param) const
@@ -171,6 +176,7 @@ MiningConfig parse_args(int argc, char *argv[])
 
     // Parse other options
     config.benchmark   = vm.count("benchmark") > 0;
+    config.auto_bench  = vm.count("auto-bench") > 0;
     config.test_sha1   = vm.count("test-sha1") > 0;
     config.debug_mode  = vm.count("debug") > 0;
     config.debug_level = vm["debug-level"].as<int>();

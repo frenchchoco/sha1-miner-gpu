@@ -548,8 +548,38 @@ void MiningSystem::logFinalConfiguration(const UserSpecifiedFlags &user_flags)
 void MiningSystem::autoTuneParameters()
 {
     LOG_INFO("AUTOTUNE", "Starting auto-tune process...");
+
     // Step 1: Detect user-specified values
     UserSpecifiedFlags user_flags = detectUserSpecifiedValues();
+
+    // Check if benchmark-based auto-tune is requested
+    bool run_bench = false;
+    if (user_config_) {
+        const auto *mining_config = static_cast<const MiningConfig *>(user_config_);
+        run_bench = mining_config->auto_bench;
+    }
+
+    // If benchmark mode and no user-specified perf params, run actual benchmark
+    if (run_bench && !user_flags.threads && !user_flags.blocks && !user_flags.streams) {
+        LOG_INFO("AUTOTUNE", "Benchmark-based auto-tune enabled!");
+
+        // Need vendor/arch detection for candidate generation
+        gpu_vendor_ = detectGPUVendor();
+#ifdef USE_HIP
+        detected_arch_ = AMDGPUDetector::detectArchitecture(device_props_);
+#endif
+
+        auto best_config = benchmarkAutoTune(4);
+        if (best_config.has_value()) {
+            config_ = *best_config;
+            LOG_INFO("AUTOTUNE", "Benchmark auto-tune applied successfully!");
+            logFinalConfiguration(user_flags);
+            return;
+        }
+        LOG_WARN("AUTOTUNE", "Benchmark auto-tune failed, falling back to table-based tuning...");
+    }
+
+    // Table-based auto-tune (original path)
     // Step 2: Determine optimal configuration based on GPU
     OptimalConfig optimal = determineOptimalConfig();
     // Step 3: Apply configuration with user preferences
@@ -1439,30 +1469,36 @@ bool MiningSystem::initializeMemoryPools()
     return true;
 }
 
-void MiningSystem::cleanup()
+void MiningSystem::cleanupGPUResourcesInternal()
 {
-    std::lock_guard lock(system_mutex_);
-
-    printFinalStats();
-
     // Synchronize and destroy streams
     for (size_t i = 0; i < streams_.size(); i++) {
         if (streams_[i]) {
             gpuStreamSynchronize(streams_[i]);
             gpuStreamDestroy(streams_[i]);
+            streams_[i] = nullptr;
         }
-        if (start_events_[i])
+        if (i < start_events_.size() && start_events_[i]) {
             gpuEventDestroy(start_events_[i]);
-        if (end_events_[i])
+            start_events_[i] = nullptr;
+        }
+        if (i < end_events_.size() && end_events_[i]) {
             gpuEventDestroy(end_events_[i]);
+            end_events_[i] = nullptr;
+        }
     }
+    streams_.clear();
+    start_events_.clear();
+    end_events_.clear();
 
     // Cleanup kernel completion events if they exist
     for (auto &kernel_complete_event : kernel_complete_events_) {
         if (kernel_complete_event) {
             gpuEventDestroy(kernel_complete_event);
+            kernel_complete_event = nullptr;
         }
     }
+    kernel_complete_events_.clear();
 
     // Free GPU memory
     for (const auto &pool : gpu_pools_) {
@@ -1473,10 +1509,12 @@ void MiningSystem::cleanup()
         if (pool.job_version)
             gpuFree(pool.job_version);
     }
+    gpu_pools_.clear();
 
     for (auto &job : device_jobs_) {
         job.free();
     }
+    device_jobs_.clear();
 
     // Free pinned memory
     for (const auto &pinned_result : pinned_results_) {
@@ -1488,6 +1526,16 @@ void MiningSystem::cleanup()
             }
         }
     }
+    pinned_results_.clear();
+}
+
+void MiningSystem::cleanup()
+{
+    std::lock_guard lock(system_mutex_);
+
+    printFinalStats();
+
+    cleanupGPUResourcesInternal();
 
 #ifdef USE_SYCL
     // Cleanup SYCL resources
@@ -1495,6 +1543,323 @@ void MiningSystem::cleanup()
     cleanup_sycl_wrappers();
 #endif
 }
+
+// ============================================================================
+// Benchmark Auto-Tune Implementation
+// ============================================================================
+
+MiningJob MiningSystem::createDummyBenchmarkJob()
+{
+    MiningJob job{};
+    // Fill base_message with pseudo-random data
+    auto seed = static_cast<uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    for (int i = 0; i < 32; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;  // LCG
+        job.base_message[i] = static_cast<uint8_t>(seed >> 33);
+    }
+    // Set target hash to arbitrary values
+    for (int i = 0; i < 5; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        job.target_hash[i] = static_cast<uint32_t>(seed >> 32);
+    }
+    job.difficulty    = 60;  // Very high → almost no results found
+    job.nonce_offset  = 1;
+    return job;
+}
+
+std::vector<MiningSystem::BenchmarkCandidate> MiningSystem::generateBenchmarkCandidates() const
+{
+    std::vector<BenchmarkCandidate> candidates;
+    const int cus       = device_props_.multiProcessorCount;
+    const int warp_size = device_props_.warpSize;
+    const int max_tpb   = device_props_.maxThreadsPerBlock;
+
+    // Thread options (filtered by warp size alignment and device max)
+    std::vector<int> thread_options;
+    for (int t : {64, 128, 256, 512}) {
+        if (t >= warp_size && t <= max_tpb && t % warp_size == 0) {
+            thread_options.push_back(t);
+        }
+    }
+    if (thread_options.empty()) {
+        thread_options.push_back(warp_size);  // Fallback
+    }
+
+    // Blocks-per-CU multipliers to test
+    std::vector<int> blocks_per_cu_options = {4, 8, 16, 24, 32};
+
+    // Phase 1: Coarse grid — fix streams=4, sweep (threads, blocks)
+    for (int t : thread_options) {
+        for (int bpc : blocks_per_cu_options) {
+            int blocks = cus * bpc;
+            // Cap to reasonable maximums
+            if (blocks > 4096) blocks = 4096;
+            if (blocks < 1) continue;
+            candidates.push_back({t, blocks, 4});
+        }
+    }
+
+    return candidates;
+}
+
+MiningSystem::BenchmarkResult MiningSystem::benchmarkSingleConfig(
+    const BenchmarkCandidate &candidate, const MiningJob &dummy_job, int num_batches)
+{
+    BenchmarkResult result;
+    result.valid = false;
+
+    // Apply candidate to config_
+    const int saved_device_id = config_.device_id;
+    config_.threads_per_block  = candidate.threads_per_block;
+    config_.blocks_per_stream  = candidate.blocks_per_stream;
+    config_.num_streams        = candidate.num_streams;
+    config_.result_buffer_size = 512;
+    config_.use_pinned_memory  = true;
+    config_.device_id          = saved_device_id;
+
+    result.config = config_;
+
+    // Try to initialize GPU resources for this config
+    if (!initializeGPUResources()) {
+        LOG_DEBUG("BENCH", "  Config failed to initialize (threads=", candidate.threads_per_block,
+                  " blocks=", candidate.blocks_per_stream, " streams=", candidate.num_streams, ")");
+        cleanupGPUResourcesInternal();
+        return result;
+    }
+
+    try {
+        // Copy dummy job to device
+        for (int i = 0; i < config_.num_streams; i++) {
+            device_jobs_[i].copyFromHost(dummy_job);
+        }
+
+        // Update base message in constant memory
+        uint32_t base_words[8];
+        std::memcpy(base_words, dummy_job.base_message, 32);
+#ifdef USE_SYCL
+        update_base_message_sycl(base_words);
+#elif defined(USE_HIP)
+        update_base_message_hip(base_words);
+#else
+        update_base_message_cuda(base_words);
+#endif
+
+        // Warm-up: 1 batch (discard timing)
+        MiningJob warmup_job = dummy_job;
+        warmup_job.nonce_offset = 1;
+        runSingleBatch(warmup_job);
+
+        // Reset counters after warmup
+        total_hashes_ = 0;
+
+        // Timed runs
+        auto start    = std::chrono::high_resolution_clock::now();
+        uint64_t total = 0;
+        for (int i = 0; i < num_batches; i++) {
+            MiningJob batch_job    = dummy_job;
+            batch_job.nonce_offset = 1 + static_cast<uint64_t>(i) * getHashesPerKernel();
+            total += runSingleBatch(batch_job);
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+
+        double elapsed = std::chrono::duration<double>(end - start).count();
+        if (elapsed > 0) {
+            result.total_hashes    = total;
+            result.elapsed_seconds = elapsed;
+            result.hash_rate_ghs   = (static_cast<double>(total) / elapsed) / 1e9;
+            result.valid           = true;
+        }
+    } catch (const std::exception &e) {
+        LOG_DEBUG("BENCH", "  Config benchmark exception: ", e.what());
+    }
+
+    // Cleanup for next config
+    cleanupGPUResourcesInternal();
+
+    return result;
+}
+
+void MiningSystem::printBenchmarkResults(const std::vector<BenchmarkResult> &results)
+{
+    // Find best
+    int best_idx    = -1;
+    double best_ghs = 0;
+    for (size_t i = 0; i < results.size(); i++) {
+        if (results[i].valid && results[i].hash_rate_ghs > best_ghs) {
+            best_ghs = results[i].hash_rate_ghs;
+            best_idx = static_cast<int>(i);
+        }
+    }
+
+    std::cout << "\n";
+    std::cout << "  ╔═══════════════════════════════════════════════════════════════════╗\n";
+    std::cout << "  ║              BENCHMARK AUTO-TUNE RESULTS                         ║\n";
+    std::cout << "  ╠═════╦══════════╦═════════╦═════════╦══════════╦═══════════════════╣\n";
+    std::cout << "  ║  #  ║ Threads  ║ Blocks  ║ Streams ║   GH/s   ║  Hashes/Kernel   ║\n";
+    std::cout << "  ╠═════╬══════════╬═════════╬═════════╬══════════╬═══════════════════╣\n";
+
+    for (size_t i = 0; i < results.size(); i++) {
+        const auto &r = results[i];
+        std::string marker = (static_cast<int>(i) == best_idx) ? " >>>" : "    ";
+        if (!r.valid) {
+            std::cout << "  ║ " << std::setw(3) << (i + 1) << " ║ "
+                      << std::setw(8) << r.config.threads_per_block << " ║ "
+                      << std::setw(7) << r.config.blocks_per_stream << " ║ "
+                      << std::setw(7) << r.config.num_streams << " ║ "
+                      << "  FAIL   " << " ║ "
+                      << "    N/A           " << "║\n";
+        } else {
+            double hpk = static_cast<double>(r.config.blocks_per_stream) *
+                         r.config.threads_per_block * NONCES_PER_THREAD / 1e9;
+            std::cout << "  ║ " << std::setw(3) << (i + 1) << " ║ "
+                      << std::setw(8) << r.config.threads_per_block << " ║ "
+                      << std::setw(7) << r.config.blocks_per_stream << " ║ "
+                      << std::setw(7) << r.config.num_streams << " ║ "
+                      << std::fixed << std::setprecision(2) << std::setw(8) << r.hash_rate_ghs << " ║ "
+                      << std::setw(9) << std::setprecision(2) << hpk << " GH"
+                      << marker << "   ║\n";
+        }
+    }
+
+    std::cout << "  ╚═════╩══════════╩═════════╩═════════╩══════════╩═══════════════════╝\n";
+
+    if (best_idx >= 0) {
+        const auto &best = results[best_idx];
+        std::cout << "\n  >>> BEST: #" << (best_idx + 1) << " — "
+                  << std::fixed << std::setprecision(2) << best.hash_rate_ghs << " GH/s"
+                  << " (threads=" << best.config.threads_per_block
+                  << ", blocks=" << best.config.blocks_per_stream
+                  << ", streams=" << best.config.num_streams << ")\n\n";
+    }
+}
+
+std::optional<MiningSystem::Config> MiningSystem::benchmarkAutoTune(int num_batches)
+{
+    LOG_INFO("BENCH", "");
+    LOG_INFO("BENCH", "╔══════════════════════════════════════════════╗");
+    LOG_INFO("BENCH", "║     BENCHMARK AUTO-TUNE STARTING            ║");
+    LOG_INFO("BENCH", "║     Testing GPU configurations...           ║");
+    LOG_INFO("BENCH", "╚══════════════════════════════════════════════╝");
+    LOG_INFO("BENCH", "");
+
+    // Save original config
+    Config original_config = config_;
+
+    // Create dummy job once
+    MiningJob dummy_job = createDummyBenchmarkJob();
+
+    // =============================================
+    // PHASE 1: Coarse grid (threads × blocks, fixed streams=4)
+    // =============================================
+    LOG_INFO("BENCH", "Phase 1: Coarse grid search (threads x blocks, streams=4)...");
+
+    auto candidates = generateBenchmarkCandidates();
+    std::vector<BenchmarkResult> phase1_results;
+    phase1_results.reserve(candidates.size());
+
+    int tested = 0;
+    for (const auto &candidate : candidates) {
+        if (g_shutdown) break;
+
+        tested++;
+        LOG_INFO("BENCH", "  [", tested, "/", candidates.size(), "] Testing: threads=",
+                 candidate.threads_per_block, " blocks=", candidate.blocks_per_stream,
+                 " streams=", candidate.num_streams);
+
+        auto result = benchmarkSingleConfig(candidate, dummy_job, num_batches);
+        phase1_results.push_back(result);
+
+        if (result.valid) {
+            LOG_INFO("BENCH", "    => ", std::fixed, std::setprecision(2),
+                     result.hash_rate_ghs, " GH/s");
+        } else {
+            LOG_WARN("BENCH", "    => FAILED");
+        }
+    }
+
+    // Find best from phase 1
+    int best_phase1_idx    = -1;
+    double best_phase1_ghs = 0;
+    for (size_t i = 0; i < phase1_results.size(); i++) {
+        if (phase1_results[i].valid && phase1_results[i].hash_rate_ghs > best_phase1_ghs) {
+            best_phase1_ghs = phase1_results[i].hash_rate_ghs;
+            best_phase1_idx = static_cast<int>(i);
+        }
+    }
+
+    if (best_phase1_idx < 0) {
+        LOG_ERROR("BENCH", "All phase 1 configurations failed!");
+        config_ = original_config;
+        return std::nullopt;
+    }
+
+    int best_threads = phase1_results[best_phase1_idx].config.threads_per_block;
+    int best_blocks  = phase1_results[best_phase1_idx].config.blocks_per_stream;
+
+    LOG_INFO("BENCH", "Phase 1 winner: threads=", best_threads, " blocks=", best_blocks,
+             " => ", std::fixed, std::setprecision(2), best_phase1_ghs, " GH/s");
+
+    // =============================================
+    // PHASE 2: Stream tuning with best (threads, blocks)
+    // =============================================
+    LOG_INFO("BENCH", "");
+    LOG_INFO("BENCH", "Phase 2: Stream tuning (streams = 2, 4, 8, 16)...");
+
+    std::vector<BenchmarkResult> phase2_results;
+    for (int streams : {2, 4, 8, 16}) {
+        if (g_shutdown) break;
+
+        LOG_INFO("BENCH", "  Testing: threads=", best_threads, " blocks=", best_blocks,
+                 " streams=", streams);
+
+        BenchmarkCandidate candidate{best_threads, best_blocks, streams};
+        auto result = benchmarkSingleConfig(candidate, dummy_job, num_batches);
+        phase2_results.push_back(result);
+
+        if (result.valid) {
+            LOG_INFO("BENCH", "    => ", std::fixed, std::setprecision(2),
+                     result.hash_rate_ghs, " GH/s");
+        } else {
+            LOG_WARN("BENCH", "    => FAILED");
+        }
+    }
+
+    // Combine all results for display
+    std::vector<BenchmarkResult> all_results;
+    all_results.insert(all_results.end(), phase1_results.begin(), phase1_results.end());
+    all_results.insert(all_results.end(), phase2_results.begin(), phase2_results.end());
+
+    // Find overall best
+    int overall_best_idx    = -1;
+    double overall_best_ghs = 0;
+    for (size_t i = 0; i < all_results.size(); i++) {
+        if (all_results[i].valid && all_results[i].hash_rate_ghs > overall_best_ghs) {
+            overall_best_ghs = all_results[i].hash_rate_ghs;
+            overall_best_idx = static_cast<int>(i);
+        }
+    }
+
+    // Print results table
+    printBenchmarkResults(all_results);
+
+    if (overall_best_idx < 0) {
+        LOG_ERROR("BENCH", "No valid benchmark results found!");
+        config_ = original_config;
+        return std::nullopt;
+    }
+
+    // Return the winning config
+    Config best_config = all_results[overall_best_idx].config;
+    best_config.device_id = original_config.device_id;  // Preserve device ID
+
+    LOG_INFO("BENCH", "Benchmark auto-tune complete! Applying best configuration.");
+    return best_config;
+}
+
+// ============================================================================
+// End Benchmark Auto-Tune
+// ============================================================================
 
 void MiningSystem::performanceMonitor() const
 {

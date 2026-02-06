@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "sha1_miner.cuh"
@@ -163,6 +164,27 @@ public:
      */
     void clearResults();
 
+    /**
+     * Result of benchmarking a single GPU configuration
+     */
+    struct BenchmarkResult
+    {
+        Config config;
+        double hash_rate_ghs = 0;
+        uint64_t total_hashes = 0;
+        double elapsed_seconds = 0;
+        bool valid = false;
+    };
+
+    /**
+     * Run benchmark-based auto-tuning: tests multiple parameter combinations
+     * and returns the best Config found.
+     * Must be called after device_props_ is populated but BEFORE initializeGPUResources().
+     * @param num_batches Number of kernel batches per config (default 4)
+     * @return Best Config found, or nullopt if benchmark failed entirely
+     */
+    std::optional<Config> benchmarkAutoTune(int num_batches = 4);
+
     // Timing statistics structure
     struct TimingStats
     {
@@ -267,6 +289,25 @@ private:
     };
 
     std::atomic<uint64_t> current_job_version_{99999};
+
+    // Benchmark auto-tune helpers
+    struct BenchmarkCandidate
+    {
+        int threads_per_block;
+        int blocks_per_stream;
+        int num_streams;
+    };
+
+    std::vector<BenchmarkCandidate> generateBenchmarkCandidates() const;
+    BenchmarkResult benchmarkSingleConfig(const BenchmarkCandidate &candidate, const MiningJob &dummy_job,
+                                          int num_batches);
+    static void printBenchmarkResults(const std::vector<BenchmarkResult> &results);
+    static MiningJob createDummyBenchmarkJob();
+
+    /**
+     * Free GPU resources without acquiring system_mutex_ (for use inside initialize/benchmark)
+     */
+    void cleanupGPUResourcesInternal();
 
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
