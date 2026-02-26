@@ -65,6 +65,7 @@ Options:
                           local  = tunnel goes from your machine through to rented
                           remote = rented machine SSHes to pool VM directly
   --ssh-port <port>       SSH port on rented machine (default: 22)
+  --ssh-cipher <cipher>   SSH cipher to use (e.g. aes128-ctr for Clore.ai)
   --dry-run               Print commands without executing
   --help                  Show this help
 EOF
@@ -76,6 +77,7 @@ EOF
 REMOTE_HOST=""
 FORCE_GPU=""
 SSH_PORT="22"
+SSH_CIPHER=""
 TUNNEL_MODE="local"
 DRY_RUN=false
 
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --force-amd)    FORCE_GPU="amd"; shift ;;
         --miner-args)   MINER_EXTRA_ARGS="$2"; shift 2 ;;
         --ssh-port)     SSH_PORT="$2"; shift 2 ;;
+        --ssh-cipher)   SSH_CIPHER="$2"; shift 2 ;;
         --tunnel-mode)  TUNNEL_MODE="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --help|-h)      usage ;;
@@ -108,8 +111,9 @@ done
 
 # ==================== HELPER ====================
 
-# SSH options (port-aware)
+# SSH options (port-aware, cipher-aware)
 SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "$SSH_PORT")
+[[ -n "$SSH_CIPHER" ]] && SSH_OPTS+=(-c "$SSH_CIPHER")
 
 # Run command on the remote host
 run_remote() {
@@ -123,7 +127,7 @@ run_remote() {
 # ==================== MAIN ====================
 
 header "OP_NET GPU Miner Deployment"
-info "Target:     $REMOTE_HOST (port $SSH_PORT)"
+info "Target:     $REMOTE_HOST (port $SSH_PORT${SSH_CIPHER:+, cipher $SSH_CIPHER})"
 info "Pool VM:    $POOL_VM"
 info "Pool port:  $POOL_PORT"
 info "Wallet:     ${WALLET:0:30}..."
@@ -340,11 +344,9 @@ if [[ "$TUNNEL_MODE" == "local" ]]; then
 
         # Try: create reverse forward on rented machine
         # -R 3333:pool_vm_host:3333 means rented:3333 -> pool_vm:3333 (routed through our machine)
-        ssh -f -N \
-            -p "$SSH_PORT" \
-            -o ExitOnForwardFailure=yes \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=3 \
+        TUNNEL_SSH_OPTS=(-f -N -p "$SSH_PORT" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+        [[ -n "$SSH_CIPHER" ]] && TUNNEL_SSH_OPTS+=(-c "$SSH_CIPHER")
+        ssh "${TUNNEL_SSH_OPTS[@]}" \
             -R "${TUNNEL_LOCAL_PORT}:${POOL_VM_HOST}:${POOL_PORT}" \
             "$REMOTE_HOST"
 
