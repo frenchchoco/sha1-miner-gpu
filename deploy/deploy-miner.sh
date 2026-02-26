@@ -112,7 +112,7 @@ done
 # ==================== HELPER ====================
 
 # SSH options (port-aware, cipher-aware)
-SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "$SSH_PORT")
+SSH_OPTS=(-o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p "$SSH_PORT")
 [[ -n "$SSH_CIPHER" ]] && SSH_OPTS+=(-c "$SSH_CIPHER")
 
 # Run command on the remote host
