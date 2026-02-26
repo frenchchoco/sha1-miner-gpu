@@ -157,23 +157,25 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
     }
 
     switch (arch) {
-        case AMDArchitecture::CDNA1:
-        case AMDArchitecture::CDNA2:
-        case AMDArchitecture::CDNA3:
         case AMDArchitecture::RDNA4:
-            config.blocks_per_sm = 4;
-            config.threads       = 256;
-            config.streams       = 4;
-            config.buffer_size   = 512;
+            // RDNA4 (RX 9070 XT/9070, Navi 48) — 32 CUs, Wave32, massive parallelism
+            // 128 threads = 4 waves per block, fits RDNA4's 2-SIMD CU well
+            // 16 blocks/CU × 32 CUs = 512 blocks, 8 streams for overlap
+            config.blocks_per_sm = 16;
+            config.threads       = 128;
+            config.streams       = 8;
+            config.buffer_size   = 1024;
             break;
         case AMDArchitecture::RDNA3:
-            config.blocks_per_sm = 6;
+            // RDNA3 (RX 7900 XTX/XT, Navi 31/32) — up to 96 CUs
+            config.blocks_per_sm = 12;
             config.threads       = 256;
-            config.streams       = 4;
-            config.buffer_size   = 256;
+            config.streams       = 8;
+            config.buffer_size   = 512;
             break;
         case AMDArchitecture::RDNA2:
-            config.blocks_per_sm = 4;
+            // RDNA2 (RX 6900 XT, Navi 21) — up to 80 CUs
+            config.blocks_per_sm = 8;
             config.threads       = 256;
             config.streams       = 4;
             config.buffer_size   = 256;
@@ -183,6 +185,15 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
             config.threads       = 256;
             config.streams       = 2;
             config.buffer_size   = 128;
+            break;
+        case AMDArchitecture::CDNA1:
+        case AMDArchitecture::CDNA2:
+        case AMDArchitecture::CDNA3:
+            // CDNA (MI100, MI250X, MI300X) — Wave64, data center, massive CU counts
+            config.blocks_per_sm = 8;
+            config.threads       = 256;
+            config.streams       = 8;
+            config.buffer_size   = 512;
             break;
         case AMDArchitecture::GCN5:
         case AMDArchitecture::GCN4:
@@ -398,16 +409,21 @@ void MiningSystem::validateConfiguration()
 #ifdef USE_HIP
         switch (detected_arch_) {
             case AMDArchitecture::RDNA4:
-                max_blocks_per_stream = 512;
+                max_blocks_per_stream = 2048;  // 32 CUs × 16 blocks/CU = 512, allow headroom
                 break;
             case AMDArchitecture::RDNA3:
-                max_blocks_per_stream = 384;
+                max_blocks_per_stream = 1536;  // Up to 96 CUs × 12 blocks/CU
+                break;
+            case AMDArchitecture::CDNA3:
+            case AMDArchitecture::CDNA2:
+            case AMDArchitecture::CDNA1:
+                max_blocks_per_stream = 1024;  // Data center, many CUs
                 break;
             case AMDArchitecture::RDNA2:
-                max_blocks_per_stream = 256;
+                max_blocks_per_stream = 768;   // Up to 80 CUs × 8 blocks/CU
                 break;
             default:
-                max_blocks_per_stream = 128;
+                max_blocks_per_stream = 256;
                 break;
         }
 #endif

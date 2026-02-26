@@ -7,11 +7,32 @@
 __constant__ uint32_t d_base_message[8];
 __constant__ uint32_t d_pre_swapped_base[8];
 
-// Add this wrapper function
+// CPU-side byte swap function
+inline uint32_t bswap32_cpu(uint32_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_bswap32(x);
+#else
+    return ((x & 0xFF000000) >> 24) | ((x & 0x00FF0000) >> 8) |
+           ((x & 0x0000FF00) << 8)  | ((x & 0x000000FF) << 24);
+#endif
+}
+
 extern "C" void update_base_message_hip(const uint32_t* base_msg_words) {
+    // Copy raw base message
     hipError_t err = hipMemcpyToSymbol(d_base_message, base_msg_words, 32);
     if (err != hipSuccess) {
         fprintf(stderr, "Failed to copy base message to constant memory: %s\n", hipGetErrorString(err));
+        return;
+    }
+
+    // Pre-compute byte-swapped version — eliminates bswap from hot kernel loop
+    uint32_t pre_swapped[8];
+    for (int j = 0; j < 8; j++) {
+        pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
+    }
+    err = hipMemcpyToSymbol(d_pre_swapped_base, pre_swapped, sizeof(pre_swapped));
+    if (err != hipSuccess) {
+        fprintf(stderr, "Failed to copy pre-swapped base to constant memory: %s\n", hipGetErrorString(err));
     }
 }
 
@@ -196,40 +217,33 @@ __global__ void sha1_mining_kernel_amd(
         if (nonce2 == 0)
             nonce2 = thread_nonce_base + nonces_per_thread + 1;
 
-        // Create messages with both nonces
-        uint32_t msg_words1[8], msg_words2[8];
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            msg_words1[j] = d_base_message[j];
-            msg_words2[j] = d_base_message[j];
-        }
-
-        // Apply nonces
-        msg_words1[6] ^= bswap32_amd(nonce1 >> 32);
-        msg_words1[7] ^= bswap32_amd(nonce1 & 0xFFFFFFFF);
-        msg_words2[6] ^= bswap32_amd(nonce2 >> 32);
-        msg_words2[7] ^= bswap32_amd(nonce2 & 0xFFFFFFFF);
-
-        // Prepare W arrays for both hashes
+        // Use pre-swapped base — eliminates 16 bswap calls per iteration
         uint32_t W1[16], W2[16];
 
-        // Unrolled byte swap for both
-        W1[0] = bswap32_amd(msg_words1[0]);
-        W2[0] = bswap32_amd(msg_words2[0]);
-        W1[1] = bswap32_amd(msg_words1[1]);
-        W2[1] = bswap32_amd(msg_words2[1]);
-        W1[2] = bswap32_amd(msg_words1[2]);
-        W2[2] = bswap32_amd(msg_words2[2]);
-        W1[3] = bswap32_amd(msg_words1[3]);
-        W2[3] = bswap32_amd(msg_words2[3]);
-        W1[4] = bswap32_amd(msg_words1[4]);
-        W2[4] = bswap32_amd(msg_words2[4]);
-        W1[5] = bswap32_amd(msg_words1[5]);
-        W2[5] = bswap32_amd(msg_words2[5]);
-        W1[6] = bswap32_amd(msg_words1[6]);
-        W2[6] = bswap32_amd(msg_words2[6]);
-        W1[7] = bswap32_amd(msg_words1[7]);
-        W2[7] = bswap32_amd(msg_words2[7]);
+        // Fixed pre-swapped parts (same for both nonces)
+        W1[0] = d_pre_swapped_base[0];
+        W2[0] = d_pre_swapped_base[0];
+        W1[1] = d_pre_swapped_base[1];
+        W2[1] = d_pre_swapped_base[1];
+        W1[2] = d_pre_swapped_base[2];
+        W2[2] = d_pre_swapped_base[2];
+        W1[3] = d_pre_swapped_base[3];
+        W2[3] = d_pre_swapped_base[3];
+        W1[4] = d_pre_swapped_base[4];
+        W2[4] = d_pre_swapped_base[4];
+        W1[5] = d_pre_swapped_base[5];
+        W2[5] = d_pre_swapped_base[5];
+
+        // Varying parts — XOR nonce directly into pre-swapped words
+        uint32_t nonce1_high = static_cast<uint32_t>(nonce1 >> 32);
+        uint32_t nonce1_low  = static_cast<uint32_t>(nonce1 & 0xFFFFFFFF);
+        W1[6] = d_pre_swapped_base[6] ^ nonce1_high;
+        W1[7] = d_pre_swapped_base[7] ^ nonce1_low;
+
+        uint32_t nonce2_high = static_cast<uint32_t>(nonce2 >> 32);
+        uint32_t nonce2_low  = static_cast<uint32_t>(nonce2 & 0xFFFFFFFF);
+        W2[6] = d_pre_swapped_base[6] ^ nonce2_high;
+        W2[7] = d_pre_swapped_base[7] ^ nonce2_low;
 
         // Apply padding to both
         W1[8]  = 0x80000000;
