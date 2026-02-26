@@ -554,11 +554,16 @@ if ! should_skip 6; then
         info "Setting up reverse tunnel: rented:$TUNNEL_LOCAL_PORT -> localhost:$POOL_PORT (this machine)"
 
         if $DRY_RUN; then
-            info "[DRY-RUN] ssh -f -N -R $TUNNEL_LOCAL_PORT:localhost:$POOL_PORT $REMOTE_HOST"
+            info "[DRY-RUN] ssh -f -N -p $SSH_PORT -R $TUNNEL_LOCAL_PORT:localhost:$POOL_PORT $REMOTE_HOST"
         else
-            # Kill any existing tunnel to this host
-            pkill -f "ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" 2>/dev/null || true
-            pkill -f "autossh.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" 2>/dev/null || true
+            # Unique tunnel identifier: includes SSH port to differentiate
+            # multiple tunnels to the same provider host (e.g. two machines on clorecloud.net)
+            TUNNEL_ID="ssh.*-p $SSH_PORT.*-R.*${TUNNEL_LOCAL_PORT}:localhost:${POOL_PORT}.*$REMOTE_HOST"
+
+            # Kill ONLY the existing tunnel for THIS specific machine (port-aware)
+            pkill -f "$TUNNEL_ID" 2>/dev/null || true
+            pkill -f "autossh.*-p $SSH_PORT.*$REMOTE_HOST" 2>/dev/null || true
+            sleep 1
 
             # Tunnel SSH options
             TUNNEL_SSH_OPTS=(-p "$SSH_PORT" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
@@ -579,23 +584,23 @@ if ! should_skip 6; then
                     "$REMOTE_HOST"
                 success "SSH tunnel established (rented:$TUNNEL_LOCAL_PORT -> localhost:$POOL_PORT)"
 
-                # Set up cron watchdog for tunnel persistence
-                WATCHDOG="/tmp/tunnel-watchdog-$(echo "$REMOTE_HOST" | tr -dc 'a-zA-Z0-9').sh"
+                # Set up cron watchdog for tunnel persistence (unique per SSH port)
+                WATCHDOG="/tmp/tunnel-watchdog-$(echo "${REMOTE_HOST}-${SSH_PORT}" | tr -dc 'a-zA-Z0-9').sh"
                 cat > "$WATCHDOG" <<WATCHEOF
 #!/bin/bash
-# Auto-generated tunnel watchdog for $REMOTE_HOST
-if ! pgrep -f "ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" >/dev/null 2>&1; then
+# Auto-generated tunnel watchdog for $REMOTE_HOST:$SSH_PORT ($WORKER_NAME)
+if ! pgrep -f "ssh.*-p $SSH_PORT.*-R.*${TUNNEL_LOCAL_PORT}:localhost:${POOL_PORT}.*$REMOTE_HOST" >/dev/null 2>&1; then
     ssh -f -N ${TUNNEL_SSH_OPTS[*]} -R ${TUNNEL_LOCAL_PORT}:localhost:${POOL_PORT} $REMOTE_HOST 2>/dev/null
 fi
 WATCHEOF
                 chmod +x "$WATCHDOG"
-                # Add cron entry every 2 minutes (idempotent)
+                # Add cron entry every 2 minutes (idempotent — removes only THIS watchdog)
                 (crontab -l 2>/dev/null | grep -v "$WATCHDOG"; echo "*/2 * * * * $WATCHDOG") | crontab - 2>/dev/null && \
                     info "Tunnel watchdog cron installed (reconnects every 2 min)" || \
                     warn "Could not install cron watchdog (crontab not available)"
             fi
 
-            info "Tunnel PID: $(pgrep -f "ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" | head -1 || echo 'autossh managed')"
+            info "Tunnel PID: $(pgrep -f "ssh.*-p $SSH_PORT.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" | head -1 || echo 'autossh managed')"
         fi
 
     elif [[ "$TUNNEL_MODE" == "remote" ]]; then
@@ -741,7 +746,7 @@ info "Useful commands:"
 info "  Check miner:    ssh -p $SSH_PORT $REMOTE_HOST 'tail -f ~/miner.log'"
 info "  Stop miner:     ssh -p $SSH_PORT $REMOTE_HOST 'pkill -f sha1_miner'"
 info "  Restart miner:  ssh -p $SSH_PORT $REMOTE_HOST 'screen -r opnet-miner'"
-info "  Kill tunnel:    pkill -f 'ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST'"
+info "  Kill tunnel:    pkill -f 'ssh.*-p $SSH_PORT.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST'"
 info "  Re-deploy:      $0 --config ${SAVE_CONFIG:-deploy/configs/<name>.conf}"
 info "  Resume failed:  $0 $REMOTE_HOST --ssh-port $SSH_PORT --resume"
 info "  Pool dashboard: http://$(echo "$POOL_VM" | cut -d@ -f2):8080"
