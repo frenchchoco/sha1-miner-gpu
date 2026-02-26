@@ -16,6 +16,23 @@ NC='\033[0m' # No Color
 # Default installation directory
 INSTALL_DIR="${1:-$PWD}"
 
+# Wait for apt locks to be released (cloud instances often run apt on boot)
+wait_for_apt() {
+    local max_wait=120
+    local waited=0
+    while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend 2>/dev/null; do
+        if [ $waited -eq 0 ]; then
+            print_info "Waiting for apt lock to be released..."
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        if [ $waited -ge $max_wait ]; then
+            print_warning "apt lock held for ${max_wait}s, proceeding anyway"
+            break
+        fi
+    done
+}
+
 # Intel mode flag (can be set via environment variable or command line)
 INTEL_MODE="${INTEL_MODE:-false}"
 
@@ -106,6 +123,7 @@ install_intel_debian() {
     print_info "Installing Intel oneAPI DPC++ compiler for Ubuntu/Debian..."
 
     # Install prerequisites
+    wait_for_apt
     $SUDO apt-get update
     $SUDO apt-get install -y wget gpg
 
@@ -211,6 +229,7 @@ setup_intel_env() {
 # Install dependencies for Ubuntu/Debian
 install_deps_debian() {
     print_info "Installing dependencies for Ubuntu/Debian..."
+    wait_for_apt
     $SUDO apt-get update
     $SUDO apt-get install -y \
         build-essential \
