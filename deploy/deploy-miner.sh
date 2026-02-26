@@ -55,7 +55,7 @@ header()  { echo -e "\n${CYAN}=== $* ===${NC}\n"; }
 detect_provider() {
     local host="$1"
     case "$host" in
-        *clorecloud.net*|*clore.ai*)
+        *clorecloud.net*|*clore.ai*|*cloreai.ru*)
             PROVIDER="clore"
             [[ -z "$SSH_CIPHER" ]] && SSH_CIPHER="aes128-ctr"
             info "Provider: Clore.ai (auto-set cipher=aes128-ctr)"
