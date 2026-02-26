@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <thread>
 
 #include "sha1_miner.cuh"
 
@@ -91,7 +92,7 @@ GPUVendor MiningSystem::detectGPUVendor() const
 {
     std::string device_name = device_props_.name;
     // Convert to lowercase for comparison
-    std::ranges::transform(device_name, device_name.begin(), ::tolower);
+    std::transform(device_name.begin(), device_name.end(), device_name.begin(), ::tolower);
     // Check for NVIDIA GPUs
     if (device_name.find("nvidia") != std::string::npos || device_name.find("geforce") != std::string::npos ||
         device_name.find("quadro") != std::string::npos || device_name.find("tesla") != std::string::npos ||

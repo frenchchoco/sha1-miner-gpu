@@ -1311,7 +1311,7 @@ namespace MiningPool {
     {
         std::lock_guard lock(mutex_);
 
-        const auto it = std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
+        const auto it = std::find_if(pools_.begin(), pools_.end(), [&name](const PoolEntry &entry) { return entry.name == name; });
 
         if (it != pools_.end()) {
             it->priority = priority;
@@ -1323,9 +1323,8 @@ namespace MiningPool {
     {
         std::lock_guard lock(mutex_);
 
-        if (const auto it =
-                std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
-            it != pools_.end()) {
+        const auto it = std::find_if(pools_.begin(), pools_.end(), [&name](const PoolEntry &entry) { return entry.name == name; });
+        if (it != pools_.end()) {
             it->enabled = enable;
         }
     }
@@ -1413,7 +1412,7 @@ namespace MiningPool {
 
             // Check if current pool is still connected
             auto it =
-                std::ranges::find_if(pools_, [this](const PoolEntry &entry) { return entry.name == active_pool_; });
+                std::find_if(pools_.begin(), pools_.end(), [this](const PoolEntry &entry) { return entry.name == active_pool_; });
 
             if (it != pools_.end() && it->mining_system) {
                 if (const auto stats = it->mining_system->get_stats(); !stats.connected || !stats.authenticated) {
@@ -1463,6 +1462,6 @@ namespace MiningPool {
 
     void MultiPoolManager::sort_pools_by_priority()
     {
-        std::ranges::sort(pools_, [](const PoolEntry &a, const PoolEntry &b) { return a.priority < b.priority; });
+        std::sort(pools_.begin(), pools_.end(), [](const PoolEntry &a, const PoolEntry &b) { return a.priority < b.priority; });
     }
 }  // namespace MiningPool
