@@ -214,8 +214,32 @@ MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
 {
     OptimalConfig config{};
     // NVIDIA GPU optimizations (CUDA only)
-    if (device_props_.major >= 8) {
-        // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
+    if (device_props_.major >= 12) {
+        // Blackwell (RTX 50xx, B100, B200) — 170+ SMs, massive parallelism
+        config.blocks_per_sm = 24;
+        config.threads       = 256;
+        config.streams       = 12;
+        config.buffer_size   = 1024;
+    } else if (device_props_.major >= 10) {
+        // Thorin/future — conservative high-end
+        config.blocks_per_sm = 20;
+        config.threads       = 256;
+        config.streams       = 10;
+        config.buffer_size   = 768;
+    } else if (device_props_.major == 9) {
+        // Hopper (H100, H200) — server GPUs, very high SM count
+        config.blocks_per_sm = 20;
+        config.threads       = 256;
+        config.streams       = 10;
+        config.buffer_size   = 768;
+    } else if (device_props_.major == 8 && device_props_.minor >= 9) {
+        // Ada Lovelace (RTX 40xx, L4, L40S) — efficient SMs
+        config.blocks_per_sm = 16;
+        config.threads       = 256;
+        config.streams       = 8;
+        config.buffer_size   = 512;
+    } else if (device_props_.major >= 8) {
+        // Ampere (RTX 30xx, A100)
         config.blocks_per_sm = 16;
         config.threads       = 256;
         config.streams       = 8;
@@ -393,7 +417,10 @@ void MiningSystem::validateConfiguration()
             config_.blocks_per_stream = max_blocks_per_stream;
         }
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
-        int max_blocks = 2048;
+        // Scale max blocks with SM count — bigger GPUs need more blocks
+        int max_blocks = (device_props_.major >= 12) ? 4096
+                       : (device_props_.major >= 9)  ? 3072
+                       : 2048;
         if (config_.blocks_per_stream > max_blocks) {
             config_.blocks_per_stream = max_blocks;
         }
