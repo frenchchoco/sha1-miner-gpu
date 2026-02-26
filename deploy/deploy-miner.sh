@@ -126,7 +126,7 @@ info "Tunnel:     $TUNNEL_MODE"
 echo
 
 # ---- Step 1: Test SSH connectivity ----
-header "Step 1/6: Testing SSH connectivity"
+header "Step 1/7: Testing SSH connectivity"
 if $DRY_RUN; then
     info "[DRY-RUN] Would test SSH to $REMOTE_HOST"
 else
@@ -137,7 +137,7 @@ else
 fi
 
 # ---- Step 2: Detect GPU type ----
-header "Step 2/6: Detecting GPU on remote machine"
+header "Step 2/7: Detecting GPU on remote machine"
 
 if [[ -n "$FORCE_GPU" ]]; then
     GPU_TYPE="$FORCE_GPU"
@@ -171,77 +171,103 @@ elif [[ "$GPU_TYPE" == "amd" ]]; then
     info "GPU(s): $GPU_INFO"
 fi
 
-# ---- Step 3: Install dependencies ----
-header "Step 3/6: Installing build dependencies"
+# ---- Step 3: Clone the miner repo ----
+header "Step 3/7: Cloning miner repo"
 
+run_remote "bash -s" <<CLONE_EOF
+    set -e
+    cd ~
+
+    # Ensure git is available (minimal bootstrap)
+    if ! command -v git &>/dev/null; then
+        echo "[CLONE] Installing git..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq git 2>/dev/null || \
+        sudo dnf install -y git 2>/dev/null || \
+        sudo pacman -Sy --noconfirm git 2>/dev/null || true
+    fi
+
+    # Clone or update the miner repo
+    if [ -d sha1-miner-gpu ]; then
+        echo "[CLONE] Updating existing repo..."
+        cd sha1-miner-gpu
+        git pull --ff-only || { echo "[CLONE] Pull failed, re-cloning..."; cd ~; rm -rf sha1-miner-gpu; git clone $MINER_REPO; cd sha1-miner-gpu; }
+    else
+        echo "[CLONE] Cloning miner repo..."
+        git clone $MINER_REPO
+        cd sha1-miner-gpu
+    fi
+    echo "[CLONE] Repo ready at ~/sha1-miner-gpu"
+CLONE_EOF
+success "Repo cloned"
+
+# ---- Step 4: Install dependencies using repo's install.sh ----
+header "Step 4/7: Installing build dependencies"
+
+info "Using the miner's install.sh (handles all distros and packages)"
+run_remote 'bash -s' <<'DEPS_EOF'
+    set -e
+    cd ~/sha1-miner-gpu
+
+    # Run the repo's own install script (supports Ubuntu, Fedora, Arch, openSUSE, Alpine)
+    echo "[DEPS] Running install.sh from the miner repo..."
+    chmod +x install.sh
+    ./install.sh
+
+    echo ""
+    echo "[DEPS] Checking GPU toolkit..."
+DEPS_EOF
+
+# Install GPU-specific toolkit if missing
 if [[ "$GPU_TYPE" == "cuda" ]]; then
-    run_remote 'bash -s' <<'DEPS_CUDA_EOF'
+    run_remote 'bash -s' <<'CUDA_EOF'
         set -e
         export DEBIAN_FRONTEND=noninteractive
 
-        echo "[DEPS] Checking build tools..."
-        PKGS=""
-        command -v cmake &>/dev/null || PKGS="$PKGS cmake"
-        command -v g++   &>/dev/null || PKGS="$PKGS g++ build-essential"
-        command -v git   &>/dev/null || PKGS="$PKGS git"
-        dpkg -s libboost-all-dev &>/dev/null 2>&1 || PKGS="$PKGS libboost-all-dev"
-        dpkg -s libssl-dev       &>/dev/null 2>&1 || PKGS="$PKGS libssl-dev"
-        dpkg -s zlib1g-dev       &>/dev/null 2>&1 || PKGS="$PKGS zlib1g-dev"
-        dpkg -s nlohmann-json3-dev &>/dev/null 2>&1 || PKGS="$PKGS nlohmann-json3-dev"
-
-        if [[ -n "$PKGS" ]]; then
-            echo "[DEPS] Installing: $PKGS"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq $PKGS
+        if command -v nvcc &>/dev/null; then
+            CUDA_VER=$(nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+            echo "[DEPS] CUDA toolkit already installed: $CUDA_VER"
         else
-            echo "[DEPS] All build dependencies already installed"
-        fi
+            echo "[DEPS] CUDA toolkit (nvcc) not found. Installing CUDA 12.9..."
 
-        # Check CUDA toolkit
-        if ! command -v nvcc &>/dev/null; then
-            echo "[DEPS] CUDA toolkit not found, installing..."
-            if ! dpkg -s cuda-toolkit &>/dev/null 2>&1; then
-                sudo apt-get install -y -qq nvidia-cuda-toolkit 2>/dev/null || \
-                    echo "[DEPS] WARNING: Could not install cuda-toolkit via apt. Please install CUDA manually."
+            # Use NVIDIA's official repo for CUDA 12.9 (as recommended in README)
+            if [ -f /etc/debian_version ]; then
+                # Detect Ubuntu version for correct package URL
+                UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.' || echo "2204")
+                CUDA_DEB="cuda-keyring_1.1-1_all.deb"
+                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/${CUDA_DEB}"
+
+                echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
+                wget -q "$CUDA_URL" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
+                    sudo dpkg -i "/tmp/${CUDA_DEB}" && \
+                    sudo apt-get update -qq && \
+                    sudo apt-get install -y cuda-toolkit-12-9 && \
+                    echo "[DEPS] CUDA 12.9 installed successfully" || {
+                        echo "[DEPS] NVIDIA repo install failed, trying apt fallback..."
+                        sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || \
+                            echo "[DEPS] WARNING: Could not install CUDA. Install manually: https://developer.nvidia.com/cuda-downloads"
+                    }
+            else
+                echo "[DEPS] Non-Debian system. Install CUDA manually: https://developer.nvidia.com/cuda-downloads"
             fi
         fi
-        echo "[DEPS] Done"
-DEPS_CUDA_EOF
+CUDA_EOF
 elif [[ "$GPU_TYPE" == "amd" ]]; then
-    run_remote 'bash -s' <<'DEPS_AMD_EOF'
+    run_remote 'bash -s' <<'AMD_EOF'
         set -e
-        export DEBIAN_FRONTEND=noninteractive
-
-        echo "[DEPS] Checking build tools..."
-        PKGS=""
-        command -v cmake &>/dev/null || PKGS="$PKGS cmake"
-        command -v g++   &>/dev/null || PKGS="$PKGS g++ build-essential"
-        command -v git   &>/dev/null || PKGS="$PKGS git"
-        dpkg -s libboost-all-dev &>/dev/null 2>&1 || PKGS="$PKGS libboost-all-dev"
-        dpkg -s libssl-dev       &>/dev/null 2>&1 || PKGS="$PKGS libssl-dev"
-        dpkg -s zlib1g-dev       &>/dev/null 2>&1 || PKGS="$PKGS zlib1g-dev"
-        dpkg -s nlohmann-json3-dev &>/dev/null 2>&1 || PKGS="$PKGS nlohmann-json3-dev"
-
-        if [[ -n "$PKGS" ]]; then
-            echo "[DEPS] Installing: $PKGS"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq $PKGS
+        if [ -d /opt/rocm ]; then
+            echo "[DEPS] ROCm found at /opt/rocm"
+            rocm-smi --version 2>/dev/null || true
         else
-            echo "[DEPS] All build dependencies already installed"
+            echo "[DEPS] WARNING: ROCm not found at /opt/rocm"
+            echo "[DEPS] Most GPU rental providers pre-install ROCm for AMD machines."
+            echo "[DEPS] If not, install ROCm 6.2+: https://rocm.docs.amd.com/en/latest/deploy/linux/index.html"
         fi
-
-        # Check ROCm
-        if [ ! -d /opt/rocm ]; then
-            echo "[DEPS] ROCm not found at /opt/rocm"
-            echo "[DEPS] Please ensure ROCm is pre-installed on this machine."
-        fi
-        echo "[DEPS] Done"
-DEPS_AMD_EOF
+AMD_EOF
 fi
 success "Dependencies ready"
 
-# ---- Step 4: Clone and build the miner ----
-header "Step 4/6: Building the miner"
+# ---- Step 5 (was 4): Build the miner ----
+header "Step 5/7: Building the miner"
 
 BUILD_FLAG=""
 if [[ "$GPU_TYPE" == "cuda" ]]; then
@@ -252,18 +278,7 @@ fi
 
 run_remote "bash -s" <<BUILD_EOF
     set -e
-    cd ~
-
-    # Clone or update the miner repo
-    if [ -d sha1-miner-gpu ]; then
-        echo "[BUILD] Updating existing repo..."
-        cd sha1-miner-gpu
-        git pull --ff-only || { echo "[BUILD] Pull failed, re-cloning..."; cd ~; rm -rf sha1-miner-gpu; git clone $MINER_REPO; cd sha1-miner-gpu; }
-    else
-        echo "[BUILD] Cloning miner repo..."
-        git clone $MINER_REPO
-        cd sha1-miner-gpu
-    fi
+    cd ~/sha1-miner-gpu
 
     # Build
     echo "[BUILD] Building with: ./build.sh $BUILD_FLAG"
@@ -284,7 +299,7 @@ BUILD_EOF
 success "Miner built"
 
 # ---- Step 5: Set up SSH tunnel ----
-header "Step 5/6: Setting up SSH tunnel to pool"
+header "Step 6/7: Setting up SSH tunnel to pool"
 
 if [[ "$TUNNEL_MODE" == "local" ]]; then
     # Local mode: we create a tunnel from our machine
@@ -362,7 +377,7 @@ else
 fi
 
 # ---- Step 6: Start the miner ----
-header "Step 6/6: Starting the miner"
+header "Step 7/7: Starting the miner"
 
 POOL_URL="ws://localhost:${TUNNEL_LOCAL_PORT}"
 
