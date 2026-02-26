@@ -552,9 +552,9 @@ fi
 
 # Detect generator conflict: if CMakeCache.txt exists with a different generator, clean it
 if [ -f CMakeCache.txt ]; then
-    CACHED_GENERATOR=$(grep -E "^CMAKE_GENERATOR:" CMakeCache.txt 2>/dev/null | sed 's/.*=//' || true)
-    if [ -n "$CACHED_GENERATOR" ] && [ "$CACHED_GENERATOR" != "$DESIRED_GENERATOR" ]; then
-        print_warning "Build directory uses '$CACHED_GENERATOR' but we want '$DESIRED_GENERATOR'"
+    if ! grep -q "CMAKE_GENERATOR:INTERNAL=$DESIRED_GENERATOR" CMakeCache.txt 2>/dev/null; then
+        CACHED_GENERATOR=$(grep "CMAKE_GENERATOR:INTERNAL=" CMakeCache.txt 2>/dev/null | sed 's/.*=//' || true)
+        print_warning "Build directory uses '${CACHED_GENERATOR:-unknown}' but we want '$DESIRED_GENERATOR'"
         print_info "Cleaning CMake cache to switch generator..."
         rm -f CMakeCache.txt
         rm -rf CMakeFiles
