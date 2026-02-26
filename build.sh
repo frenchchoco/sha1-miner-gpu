@@ -543,9 +543,22 @@ fi
 
 # Prefer Ninja build system if available (faster, better error output)
 CMAKE_GENERATOR=""
+DESIRED_GENERATOR="Unix Makefiles"
 if command -v ninja &>/dev/null; then
     CMAKE_GENERATOR="-G Ninja"
+    DESIRED_GENERATOR="Ninja"
     print_info "Using Ninja build system"
+fi
+
+# Detect generator conflict: if CMakeCache.txt exists with a different generator, clean it
+if [ -f CMakeCache.txt ]; then
+    CACHED_GENERATOR=$(grep -E "^CMAKE_GENERATOR:" CMakeCache.txt 2>/dev/null | sed 's/.*=//' || true)
+    if [ -n "$CACHED_GENERATOR" ] && [ "$CACHED_GENERATOR" != "$DESIRED_GENERATOR" ]; then
+        print_warning "Build directory uses '$CACHED_GENERATOR' but we want '$DESIRED_GENERATOR'"
+        print_info "Cleaning CMake cache to switch generator..."
+        rm -f CMakeCache.txt
+        rm -rf CMakeFiles
+    fi
 fi
 
 print_info "Running CMake with args: $CMAKE_GENERATOR $CMAKE_ARGS"
