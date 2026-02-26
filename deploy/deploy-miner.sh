@@ -64,6 +64,7 @@ Options:
   --tunnel-mode <mode>    Tunnel mode: "local" or "remote" (default: local)
                           local  = tunnel goes from your machine through to rented
                           remote = rented machine SSHes to pool VM directly
+  --ssh-port <port>       SSH port on rented machine (default: 22)
   --dry-run               Print commands without executing
   --help                  Show this help
 EOF
@@ -74,6 +75,7 @@ EOF
 
 REMOTE_HOST=""
 FORCE_GPU=""
+SSH_PORT="22"
 TUNNEL_MODE="local"
 DRY_RUN=false
 
@@ -86,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --force-cuda)   FORCE_GPU="cuda"; shift ;;
         --force-amd)    FORCE_GPU="amd"; shift ;;
         --miner-args)   MINER_EXTRA_ARGS="$2"; shift 2 ;;
+        --ssh-port)     SSH_PORT="$2"; shift 2 ;;
         --tunnel-mode)  TUNNEL_MODE="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --help|-h)      usage ;;
@@ -105,19 +108,22 @@ done
 
 # ==================== HELPER ====================
 
+# SSH options (port-aware)
+SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "$SSH_PORT")
+
 # Run command on the remote host
 run_remote() {
     if $DRY_RUN; then
-        echo "[DRY-RUN] ssh $REMOTE_HOST: $*"
+        echo "[DRY-RUN] ssh -p $SSH_PORT $REMOTE_HOST: $*"
     else
-        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$REMOTE_HOST" "$@"
+        ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "$@"
     fi
 }
 
 # ==================== MAIN ====================
 
 header "OP_NET GPU Miner Deployment"
-info "Target:     $REMOTE_HOST"
+info "Target:     $REMOTE_HOST (port $SSH_PORT)"
 info "Pool VM:    $POOL_VM"
 info "Pool port:  $POOL_PORT"
 info "Wallet:     ${WALLET:0:30}..."
@@ -130,7 +136,7 @@ header "Step 1/7: Testing SSH connectivity"
 if $DRY_RUN; then
     info "[DRY-RUN] Would test SSH to $REMOTE_HOST"
 else
-    if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$REMOTE_HOST" "echo ok" &>/dev/null; then
+    if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" &>/dev/null; then
         error "Cannot SSH to $REMOTE_HOST. Check your credentials."
     fi
     success "SSH connection OK"
@@ -335,6 +341,7 @@ if [[ "$TUNNEL_MODE" == "local" ]]; then
         # Try: create reverse forward on rented machine
         # -R 3333:pool_vm_host:3333 means rented:3333 -> pool_vm:3333 (routed through our machine)
         ssh -f -N \
+            -p "$SSH_PORT" \
             -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=3 \
@@ -438,8 +445,8 @@ header "Deployment Complete"
 success "Miner deployed to $REMOTE_HOST"
 echo
 info "Useful commands:"
-info "  Check miner:    ssh $REMOTE_HOST 'tail -f ~/miner.log'"
-info "  Stop miner:     ssh $REMOTE_HOST 'pkill -f sha1_miner'"
-info "  Restart miner:  ssh $REMOTE_HOST 'screen -r opnet-miner'"
+info "  Check miner:    ssh -p $SSH_PORT $REMOTE_HOST 'tail -f ~/miner.log'"
+info "  Stop miner:     ssh -p $SSH_PORT $REMOTE_HOST 'pkill -f sha1_miner'"
+info "  Restart miner:  ssh -p $SSH_PORT $REMOTE_HOST 'screen -r opnet-miner'"
 info "  Kill tunnel:    pkill -f 'ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST'"
 info "  Pool dashboard: http://$(echo "$POOL_VM" | cut -d@ -f2):8080"
