@@ -565,8 +565,16 @@ if ! should_skip 6; then
             pkill -f "autossh.*-p $SSH_PORT.*$REMOTE_HOST" 2>/dev/null || true
             sleep 1
 
-            # Tunnel SSH options
-            TUNNEL_SSH_OPTS=(-p "$SSH_PORT" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+            # Tunnel SSH options — optimized for low-latency mining
+            TUNNEL_SSH_OPTS=(
+                -p "$SSH_PORT"
+                -o ExitOnForwardFailure=yes
+                -o ServerAliveInterval=15
+                -o ServerAliveCountMax=3
+                -o TCPKeepAlive=yes
+                -o Compression=no
+                -o IPQoS=lowdelay
+            )
             [[ -n "$SSH_CIPHER" ]] && TUNNEL_SSH_OPTS+=(-c "$SSH_CIPHER")
 
             # Prefer autossh for auto-reconnect, fallback to plain SSH

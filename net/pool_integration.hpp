@@ -37,7 +37,7 @@ namespace MiningPool {
             uint32_t min_share_difficulty   = 20;  // Minimum difficulty in BITS (default: 20 bits)
             uint32_t max_share_difficulty   = 55;  // Maximum difficulty in BITS (default: 50 bits)
             bool enable_vardiff             = true;
-            uint32_t share_scan_interval_ms = 500;
+            uint32_t share_scan_interval_ms = 100;  // Low-latency: scan shares every 100ms
 
             const void *mining_config = nullptr;
         };

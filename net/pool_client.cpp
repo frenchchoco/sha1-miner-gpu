@@ -202,13 +202,13 @@ namespace MiningPool {
                         }
 
                         // Set buffer sizes
-                        socket.set_option(boost::asio::socket_base::receive_buffer_size(65536), ec);
+                        socket.set_option(boost::asio::socket_base::receive_buffer_size(262144), ec);
                         if (ec) {
                             LOG_WARN("CLIENT", "Failed to set receive buffer size: ", ec.message());
                             ec.clear();
                         }
 
-                        socket.set_option(boost::asio::socket_base::send_buffer_size(65536), ec);
+                        socket.set_option(boost::asio::socket_base::send_buffer_size(262144), ec);
                         if (ec) {
                             LOG_WARN("CLIENT", "Failed to set send buffer size: ", ec.message());
                             ec.clear();

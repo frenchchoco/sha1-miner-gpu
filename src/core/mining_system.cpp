@@ -1158,13 +1158,12 @@ void MiningSystem::processResultsOptimized(int stream_idx)
         if (results[i].nonce == 0)
             continue;
 
-        // Check if result is from current job version
-        /* if (results[i].job_version != current_job_version_) {
-             // Skip stale results from old job versions
-             stale_count++;
-             LOG_TRACE("MINING", "Skipping stale result from job version ", results[i].job_version);
-             continue;
-         }*/
+        // Check if result is from current job version — drop stale shares
+        if (results[i].job_version != current_job_version_) {
+            stale_count++;
+            LOG_TRACE("MINING", "Skipping stale result from job version ", results[i].job_version);
+            continue;
+        }
 
         // Store all valid results from current job
         valid_results.push_back(results[i]);
