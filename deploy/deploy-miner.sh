@@ -140,7 +140,8 @@ header "Step 1/7: Testing SSH connectivity"
 if $DRY_RUN; then
     info "[DRY-RUN] Would test SSH to $REMOTE_HOST"
 else
-    if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" &>/dev/null; then
+    info "Testing: ssh ${SSH_OPTS[*]} $REMOTE_HOST 'echo ok'"
+    if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok"; then
         error "Cannot SSH to $REMOTE_HOST. Check your credentials."
     fi
     success "SSH connection OK"
