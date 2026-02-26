@@ -324,33 +324,25 @@ if [[ "$TUNNEL_MODE" == "local" ]]; then
     # SSH from HERE to the RENTED machine, forwarding rented:3333 -> pool_vm:3333
     # This requires our machine can reach pool_vm.
 
-    info "Setting up tunnel: $REMOTE_HOST:$TUNNEL_LOCAL_PORT -> $POOL_VM:$POOL_PORT"
+    info "Setting up reverse tunnel: Clore:$TUNNEL_LOCAL_PORT -> localhost:$POOL_PORT (this machine)"
     info "Starting SSH tunnel in background..."
 
     if $DRY_RUN; then
         info "[DRY-RUN] ssh -f -N -R $TUNNEL_LOCAL_PORT:localhost:$POOL_PORT $REMOTE_HOST"
-        info "[DRY-RUN] (requires $POOL_VM:$POOL_PORT to be reachable from here via another hop)"
     else
         # Kill any existing tunnel to this host
         pkill -f "ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" 2>/dev/null || true
 
-        # We need the rented machine to reach ws://localhost:3333.
-        # So we create a REVERSE tunnel: rented:3333 -> here -> pool_vm:3333
-        # First, ensure we can reach the pool VM
-        POOL_VM_HOST=$(echo "$POOL_VM" | cut -d@ -f2)
-
-        # Option A: Direct - if rented machine can reach pool VM
-        # Option B: Two-hop via our machine
-
-        # Try: create reverse forward on rented machine
-        # -R 3333:pool_vm_host:3333 means rented:3333 -> pool_vm:3333 (routed through our machine)
+        # Reverse tunnel: rented_machine:3333 -> (through SSH) -> localhost:3333
+        # The pool server runs on THIS machine (the one running the deploy script),
+        # so we use localhost — no need to route to a LAN IP.
         TUNNEL_SSH_OPTS=(-f -N -p "$SSH_PORT" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
         [[ -n "$SSH_CIPHER" ]] && TUNNEL_SSH_OPTS+=(-c "$SSH_CIPHER")
         ssh "${TUNNEL_SSH_OPTS[@]}" \
-            -R "${TUNNEL_LOCAL_PORT}:${POOL_VM_HOST}:${POOL_PORT}" \
+            -R "${TUNNEL_LOCAL_PORT}:localhost:${POOL_PORT}" \
             "$REMOTE_HOST"
 
-        success "SSH tunnel established (rented:$TUNNEL_LOCAL_PORT -> $POOL_VM_HOST:$POOL_PORT)"
+        success "SSH tunnel established (rented:$TUNNEL_LOCAL_PORT -> localhost:$POOL_PORT)"
         info "Tunnel PID: $(pgrep -f "ssh.*-R.*$TUNNEL_LOCAL_PORT.*$REMOTE_HOST" | head -1)"
     fi
 
