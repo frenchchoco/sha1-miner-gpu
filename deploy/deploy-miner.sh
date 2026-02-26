@@ -234,16 +234,23 @@ if [[ "$GPU_TYPE" == "cuda" ]]; then
         set -e
         export DEBIAN_FRONTEND=noninteractive
 
+        # Add common CUDA paths to PATH (cloud images often have CUDA pre-installed)
+        for p in /usr/local/cuda/bin /usr/local/cuda-12*/bin; do
+            [ -d "$p" ] && export PATH="$p:$PATH"
+        done
+
         if command -v nvcc &>/dev/null; then
             CUDA_VER=$(nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
             echo "[DEPS] CUDA toolkit already installed: $CUDA_VER"
         else
-            echo "[DEPS] CUDA toolkit (nvcc) not found. Installing CUDA 12.9..."
+            echo "[DEPS] CUDA toolkit (nvcc) not found in PATH. Installing CUDA 12.9..."
 
-            # Use NVIDIA's official repo for CUDA 12.9 (as recommended in README)
             if [ -f /etc/debian_version ]; then
-                # Detect Ubuntu version for correct package URL
-                UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.' || echo "2204")
+                # Detect Ubuntu version — multiple fallbacks
+                UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.')
+                [ -z "$UBUNTU_VER" ] && UBUNTU_VER=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
+                [ -z "$UBUNTU_VER" ] && UBUNTU_VER="2204"
+
                 CUDA_DEB="cuda-keyring_1.1-1_all.deb"
                 CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/${CUDA_DEB}"
 
@@ -260,6 +267,12 @@ if [[ "$GPU_TYPE" == "cuda" ]]; then
             else
                 echo "[DEPS] Non-Debian system. Install CUDA manually: https://developer.nvidia.com/cuda-downloads"
             fi
+        fi
+
+        # Persist CUDA PATH for build step
+        if [ -d /usr/local/cuda/bin ]; then
+            grep -q '/usr/local/cuda/bin' /etc/environment 2>/dev/null || \
+                echo "PATH=/usr/local/cuda/bin:\$PATH" >> ~/.bashrc
         fi
 CUDA_EOF
 elif [[ "$GPU_TYPE" == "amd" ]]; then
@@ -290,6 +303,11 @@ fi
 run_remote "bash -s" <<BUILD_EOF
     set -e
     cd ~/sha1-miner-gpu
+
+    # Ensure CUDA is in PATH for build
+    for p in /usr/local/cuda/bin /usr/local/cuda-12*/bin; do
+        [ -d "\$p" ] && export PATH="\$p:\$PATH"
+    done
 
     # Build
     echo "[BUILD] Building with: ./build.sh $BUILD_FLAG"
