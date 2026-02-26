@@ -112,17 +112,125 @@ detect_distro() {
     fi
 }
 
-# Check for sudo
+# Check for sudo (handles root containers without sudo installed)
 check_sudo() {
-    if [ "$EUID" -eq 0 ]; then
+    if [ "$EUID" -eq 0 ] || [ "$(id -u)" -eq 0 ]; then
         SUDO=""
-    else
-        SUDO="sudo"
-        # Test sudo access
-        if ! sudo -n true 2>/dev/null; then
-            print_warning "This script requires sudo access to install packages."
-            sudo true
+    elif command -v sudo &>/dev/null; then
+        if sudo -n true 2>/dev/null; then
+            SUDO="sudo"
+        else
+            print_warning "sudo requires a password. Running as current user (may fail for package installs)."
+            SUDO=""
         fi
+    else
+        print_warning "sudo not installed. Running as current user (may fail for package installs)."
+        SUDO=""
+    fi
+}
+
+# Fix conflicting CUDA apt sources from Docker images (PyTorch, Jupyter, etc.)
+fix_cuda_apt_sources() {
+    # Only relevant for Debian/Ubuntu
+    [ ! -f /etc/debian_version ] && return 0
+
+    print_info "Checking for conflicting CUDA apt sources..."
+
+    local conflicts_found=false
+
+    # Docker images (PyTorch, Jupyter) often add their own CUDA repos
+    # that conflict with the official NVIDIA repo (different Signed-By keys)
+    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+        [ ! -f "$f" ] && continue
+        if grep -q "developer.download.nvidia.com/compute/cuda" "$f" 2>/dev/null; then
+            print_warning "Found potentially conflicting CUDA source: $f"
+            $SUDO mv "$f" "$f.bak"
+            conflicts_found=true
+        fi
+    done
+
+    # Remove broken CUDA pinning from Docker images
+    for f in /etc/apt/preferences.d/*cuda* /etc/apt/preferences.d/*nvidia*; do
+        if [ -f "$f" ]; then
+            print_warning "Removing CUDA apt pin: $f"
+            $SUDO rm -f "$f"
+            conflicts_found=true
+        fi
+    done
+
+    if [ "$conflicts_found" = true ]; then
+        print_info "Cleaned up conflicting sources. Refreshing package lists..."
+        apt_retry update
+    fi
+}
+
+# Install CUDA toolkit (smart version detection from driver)
+install_cuda_toolkit() {
+    # Add CUDA paths
+    for p in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
+        [ -d "$p" ] && export PATH="$p:$PATH"
+    done
+
+    # Skip if nvcc already available
+    if command -v nvcc &>/dev/null; then
+        local ver
+        ver=$(nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+        print_success "CUDA toolkit already installed: $ver"
+        return 0
+    fi
+
+    print_info "CUDA toolkit (nvcc) not found. Installing..."
+
+    # Detect what the driver supports
+    local driver_cuda=""
+    if command -v nvidia-smi &>/dev/null; then
+        driver_cuda=$(nvidia-smi 2>/dev/null | grep "CUDA Version" | sed 's/.*CUDA Version: //' | sed 's/ .*//')
+    fi
+
+    if [ -z "$driver_cuda" ]; then
+        print_warning "Cannot detect CUDA version from driver."
+        driver_cuda="12.4"
+    fi
+
+    local major minor cuda_pkg
+    major=$(echo "$driver_cuda" | cut -d. -f1)
+    minor=$(echo "$driver_cuda" | cut -d. -f2)
+    cuda_pkg="cuda-toolkit-${major}-${minor}"
+
+    print_info "Driver supports CUDA $driver_cuda. Installing $cuda_pkg..."
+
+    if [ -f /etc/debian_version ]; then
+        # Clean conflicting sources first
+        fix_cuda_apt_sources
+
+        # Detect Ubuntu version
+        local ubuntu_ver
+        ubuntu_ver=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
+        [ -z "$ubuntu_ver" ] && ubuntu_ver="2204"
+
+        # Install cuda-keyring
+        local keyring_deb="cuda-keyring_1.1-1_all.deb"
+        local keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${ubuntu_ver}/x86_64/${keyring_deb}"
+
+        wget -q "$keyring_url" -O "/tmp/${keyring_deb}" 2>/dev/null && \
+            $SUDO dpkg -i "/tmp/${keyring_deb}" && \
+            apt_retry update && \
+            apt_retry install -y "$cuda_pkg" && \
+            print_success "$cuda_pkg installed" && return 0
+
+        # Fallback: try generic cuda-toolkit
+        print_warning "Specific version failed, trying generic cuda-toolkit..."
+        apt_retry install -y cuda-toolkit 2>/dev/null && return 0
+
+        # Last resort: distro package
+        print_warning "NVIDIA repo failed, trying nvidia-cuda-toolkit from distro..."
+        apt_retry install -y nvidia-cuda-toolkit 2>/dev/null && return 0
+
+        print_error "Could not install CUDA toolkit. Install manually: https://developer.nvidia.com/cuda-downloads"
+        return 1
+    else
+        print_warning "Non-Debian system. Install CUDA manually: https://developer.nvidia.com/cuda-downloads"
+        return 1
     fi
 }
 
@@ -249,7 +357,8 @@ install_deps_debian() {
         pkg-config \
         wget \
         curl \
-        ninja-build
+        ninja-build \
+        ccache
 
     # Install Intel oneAPI if requested
     if [ "$INTEL_MODE" = true ]; then
@@ -397,7 +506,7 @@ check_gpu() {
 
 # Main installation
 main() {
-    clear 2>/dev/null || true
+    [ -t 1 ] && [ -n "${TERM:-}" ] && clear 2>/dev/null || true
     echo "====================================="
     echo "SHA-1 Miner - Linux Dependencies Installer"
     echo "====================================="

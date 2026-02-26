@@ -30,6 +30,53 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# Check GCC version (C++20 requires GCC >= 10)
+check_gcc_version() {
+    local gcc_cmd="${CXX:-g++}"
+    if ! command -v "$gcc_cmd" &>/dev/null; then
+        gcc_cmd="g++"
+    fi
+
+    if ! command -v "$gcc_cmd" &>/dev/null; then
+        print_warning "g++ not found. Install build-essential first."
+        return 1
+    fi
+
+    local gcc_ver
+    gcc_ver=$("$gcc_cmd" -dumpversion 2>/dev/null | cut -d. -f1)
+
+    if [ -n "$gcc_ver" ] && [ "$gcc_ver" -lt 10 ] 2>/dev/null; then
+        print_warning "GCC $gcc_ver detected. This project uses C++20 and works best with GCC >= 10."
+
+        # Try to find a newer version already installed
+        for v in 14 13 12 11 10; do
+            if command -v "g++-$v" &>/dev/null; then
+                print_info "Found g++-$v on this system. Using it."
+                export CXX="g++-$v"
+                export CC="gcc-$v"
+                return 0
+            fi
+        done
+
+        print_error "No GCC >= 10 found. Install a newer GCC:"
+        print_info "  Ubuntu: sudo apt-get install -y gcc-12 g++-12"
+        print_info "  Then: export CXX=g++-12 CC=gcc-12"
+        return 1
+    fi
+
+    print_info "GCC version: $gcc_ver (OK)"
+    return 0
+}
+
+# Setup ccache for faster rebuilds
+setup_ccache() {
+    if command -v ccache &>/dev/null; then
+        print_info "ccache detected, enabling for faster rebuilds"
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+        export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+    fi
+}
+
 # Function to find the best CUDA installation
 find_cuda() {
     local cuda_paths=()
@@ -243,16 +290,28 @@ if [ "$GPU_TYPE" = "CUDA" ]; then
     # Find best CUDA installation
     CUDA_PATH=$(find_cuda)
     if [ $? -ne 0 ] || [ -z "$CUDA_PATH" ]; then
-        print_error "CUDA installation not found!"
-        print_info "Please install CUDA toolkit or set CUDA_HOME environment variable"
-        exit 1
+        # Extra fallback: scan for CUDA directories one more time
+        for p in /usr/local/cuda /usr/local/cuda-12 /usr/local/cuda-11 /opt/cuda; do
+            if [ -f "$p/bin/nvcc" ]; then
+                CUDA_PATH="$p"
+                break
+            fi
+        done
+        if [ -z "$CUDA_PATH" ]; then
+            print_error "CUDA installation not found!"
+            print_info "Please install CUDA toolkit or set CUDA_HOME environment variable"
+            exit 1
+        fi
     fi
 
     print_info "Found CUDA installation: $CUDA_PATH"
 
     # Set CUDA environment
     export PATH="$CUDA_PATH/bin:$PATH"
-    export LD_LIBRARY_PATH="$CUDA_PATH/lib64:$LD_LIBRARY_PATH"
+    # Handle both lib64 and lib directories
+    for libdir in "$CUDA_PATH/lib64" "$CUDA_PATH/lib"; do
+        [ -d "$libdir" ] && export LD_LIBRARY_PATH="$libdir:${LD_LIBRARY_PATH:-}"
+    done
     export CUDA_HOME="$CUDA_PATH"
     export CUDACXX="$CUDA_PATH/bin/nvcc"
 
@@ -440,6 +499,10 @@ if [ "$GPU_TYPE" = "HIP" ]; then
     print_info "Will build for architectures: $HIP_ARCH"
 fi
 
+# Pre-build checks
+check_gcc_version || { print_warning "Proceeding anyway..."; }
+setup_ccache
+
 # Create build directory
 BUILD_DIR="build"
 if [ "$BUILD_TYPE" = "Debug" ]; then
@@ -478,8 +541,15 @@ else
     fi
 fi
 
-print_info "Running CMake with args: $CMAKE_ARGS"
-eval cmake .. $CMAKE_ARGS
+# Prefer Ninja build system if available (faster, better error output)
+CMAKE_GENERATOR=""
+if command -v ninja &>/dev/null; then
+    CMAKE_GENERATOR="-G Ninja"
+    print_info "Using Ninja build system"
+fi
+
+print_info "Running CMake with args: $CMAKE_GENERATOR $CMAKE_ARGS"
+eval cmake .. $CMAKE_GENERATOR $CMAKE_ARGS
 
 if [ $? -ne 0 ]; then
     print_error "CMake configuration failed"
@@ -488,7 +558,11 @@ fi
 
 # Build
 print_info "Building with $THREADS threads..."
-make -j$THREADS
+if [ -f build.ninja ]; then
+    ninja -j$THREADS
+else
+    make -j$THREADS
+fi
 
 if [ $? -ne 0 ]; then
     print_error "Build failed"
