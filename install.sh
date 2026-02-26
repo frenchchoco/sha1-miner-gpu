@@ -372,7 +372,7 @@ check_gpu() {
 
 # Main installation
 main() {
-    clear
+    clear 2>/dev/null || true
     echo "====================================="
     echo "SHA-1 Miner - Linux Dependencies Installer"
     echo "====================================="
