@@ -16,21 +16,29 @@ NC='\033[0m' # No Color
 # Default installation directory
 INSTALL_DIR="${1:-$PWD}"
 
-# Wait for apt locks to be released (cloud instances often run apt on boot)
-wait_for_apt() {
-    local max_wait=120
-    local waited=0
-    while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend 2>/dev/null; do
-        if [ $waited -eq 0 ]; then
-            print_info "Waiting for apt lock to be released..."
+# Wrapper around apt-get that waits for locks and retries (cloud instances run apt on boot)
+apt_retry() {
+    local max_attempts=12
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        if $SUDO apt-get "$@" 2>&1; then
+            return 0
         fi
-        sleep 5
-        waited=$((waited + 5))
-        if [ $waited -ge $max_wait ]; then
-            print_warning "apt lock held for ${max_wait}s, proceeding anyway"
-            break
+        local exit_code=$?
+        # Check if it was a lock error (exit code 100 from apt)
+        if [ $attempt -lt $max_attempts ]; then
+            print_info "apt-get failed (attempt $attempt/$max_attempts), waiting 10s for lock..."
+            sleep 10
         fi
+        attempt=$((attempt + 1))
     done
+    print_error "apt-get $* failed after $max_attempts attempts"
+    return 1
+}
+
+# Legacy wrapper kept for compatibility
+wait_for_apt() {
+    :
 }
 
 # Intel mode flag (can be set via environment variable or command line)
@@ -123,9 +131,8 @@ install_intel_debian() {
     print_info "Installing Intel oneAPI DPC++ compiler for Ubuntu/Debian..."
 
     # Install prerequisites
-    wait_for_apt
-    $SUDO apt-get update
-    $SUDO apt-get install -y wget gpg
+    apt_retry update
+    apt_retry install -y wget gpg
 
     # Add Intel's GPG key
     wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | \
@@ -136,8 +143,8 @@ install_intel_debian() {
         $SUDO tee /etc/apt/sources.list.d/oneAPI.list
 
     # Update and install the compiler
-    $SUDO apt-get update
-    $SUDO apt-get install -y intel-oneapi-compiler-dpcpp-cpp
+    apt_retry update
+    apt_retry install -y intel-oneapi-compiler-dpcpp-cpp
 
     print_success "Intel oneAPI DPC++ compiler installed successfully"
 }
@@ -229,9 +236,8 @@ setup_intel_env() {
 # Install dependencies for Ubuntu/Debian
 install_deps_debian() {
     print_info "Installing dependencies for Ubuntu/Debian..."
-    wait_for_apt
-    $SUDO apt-get update
-    $SUDO apt-get install -y \
+    apt_retry update
+    apt_retry install -y \
         build-essential \
         cmake \
         git \
