@@ -234,6 +234,10 @@ if [[ "$GPU_TYPE" == "cuda" ]]; then
         set -e
         export DEBIAN_FRONTEND=noninteractive
 
+        # Use sudo only if not root
+        SUDO=""
+        [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+
         # Add common CUDA paths to PATH (cloud images often have CUDA pre-installed)
         for p in /usr/local/cuda/bin /usr/local/cuda-12*/bin; do
             [ -d "$p" ] && export PATH="$p:$PATH"
@@ -256,23 +260,22 @@ if [[ "$GPU_TYPE" == "cuda" ]]; then
 
                 echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
                 wget -q "$CUDA_URL" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
-                    sudo dpkg -i "/tmp/${CUDA_DEB}" && \
-                    sudo apt-get update -qq && \
-                    sudo apt-get install -y cuda-toolkit-12-9 && \
+                    $SUDO dpkg -i "/tmp/${CUDA_DEB}" && \
+                    $SUDO apt-get update -qq && \
+                    $SUDO apt-get install -y cuda-toolkit-12-9 && \
                     echo "[DEPS] CUDA 12.9 installed successfully" || {
                         echo "[DEPS] NVIDIA repo install failed, trying apt fallback..."
-                        sudo apt-get install -y nvidia-cuda-toolkit 2>/dev/null || \
+                        $SUDO apt-get install -y nvidia-cuda-toolkit 2>/dev/null || \
                             echo "[DEPS] WARNING: Could not install CUDA. Install manually: https://developer.nvidia.com/cuda-downloads"
                     }
+
+                # Update PATH after install
+                for p in /usr/local/cuda/bin /usr/local/cuda-12*/bin; do
+                    [ -d "$p" ] && export PATH="$p:$PATH"
+                done
             else
                 echo "[DEPS] Non-Debian system. Install CUDA manually: https://developer.nvidia.com/cuda-downloads"
             fi
-        fi
-
-        # Persist CUDA PATH for build step
-        if [ -d /usr/local/cuda/bin ]; then
-            grep -q '/usr/local/cuda/bin' /etc/environment 2>/dev/null || \
-                echo "PATH=/usr/local/cuda/bin:\$PATH" >> ~/.bashrc
         fi
 CUDA_EOF
 elif [[ "$GPU_TYPE" == "amd" ]]; then
