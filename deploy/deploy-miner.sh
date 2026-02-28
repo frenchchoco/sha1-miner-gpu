@@ -427,6 +427,7 @@ if ! should_skip 4; then
 DEPS_EOF
 
     # Install GPU-specific toolkit if missing — strict version matching
+    # Strategy: apt first → .run installer fallback (handles broken repos, Docker images, etc.)
     if [[ "$GPU_TYPE" == "cuda" ]]; then
         CUDA_INSTALL_RESULT=$(run_remote_script <<'CUDA_EOF'
         # 1. Detect driver's max supported CUDA version
@@ -465,51 +466,105 @@ DEPS_EOF
             fi
         fi
 
-        # 3. Install the toolkit matching the driver version (NEVER generic/latest)
+        # 3. Try apt install first (fast if repo works)
         echo "[DEPS] Installing cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}..."
+        APT_OK=false
 
-        if [ ! -f /etc/debian_version ]; then
-            echo "CUDA_INSTALL_FAIL:not_debian"
-            echo "[DEPS] ERROR: Non-Debian system. Install CUDA $DRIVER_CUDA_VER manually."
-            exit 0
+        if [ -f /etc/debian_version ]; then
+            # Clean conflicting sources from Docker/Jupyter images
+            for f in /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia*; do
+                [ -f "$f" ] && { echo "[DEPS] Removing conflicting source: $f"; $SUDO rm -f "$f"; }
+            done
+            $SUDO rm -f /etc/apt/preferences.d/*cuda* /etc/apt/preferences.d/*nvidia* 2>/dev/null || true
+
+            # Detect Ubuntu version
+            UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.')
+            [ -z "$UBUNTU_VER" ] && UBUNTU_VER=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
+            [ -z "$UBUNTU_VER" ] && UBUNTU_VER="2204"
+            REPO_BASE="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64"
+
+            # Add NVIDIA repo — both keyring AND explicit sources list (DEB822 compat for Ubuntu 24.04+)
+            CUDA_DEB="cuda-keyring_1.1-1_all.deb"
+            echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
+            wget -q "${REPO_BASE}/${CUDA_DEB}" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
+                $SUDO dpkg -i "/tmp/${CUDA_DEB}" 2>/dev/null
+
+            # Ensure sources list exists (cuda-keyring may only install GPG key on Ubuntu 24.04+)
+            if [ ! -f /etc/apt/sources.list.d/cuda*.list ] && [ ! -f /etc/apt/sources.list.d/cuda*.sources ]; then
+                echo "[DEPS] Creating explicit CUDA sources list (DEB822 workaround)..."
+                echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] ${REPO_BASE}/ /" | \
+                    $SUDO tee /etc/apt/sources.list.d/cuda-nvidia.list > /dev/null
+            fi
+
+            $SUDO apt-get update -qq 2>/dev/null
+
+            # Verify repo is actually serving packages
+            if apt-cache search "^cuda-toolkit-${CUDA_MAJOR}" 2>/dev/null | grep -q "cuda-toolkit"; then
+                CUDA_PKG="cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
+                if $SUDO apt-get install -y "$CUDA_PKG" 2>/dev/null; then
+                    echo "[DEPS] $CUDA_PKG installed via apt"
+                    APT_OK=true
+                else
+                    echo "[DEPS] $CUDA_PKG failed, trying cuda-toolkit-${CUDA_MAJOR}..."
+                    if $SUDO apt-get install -y "cuda-toolkit-${CUDA_MAJOR}" 2>/dev/null; then
+                        echo "[DEPS] cuda-toolkit-${CUDA_MAJOR} installed via apt"
+                        APT_OK=true
+                    fi
+                fi
+            else
+                echo "[DEPS] NVIDIA apt repo has no cuda-toolkit packages — skipping apt"
+            fi
         fi
 
-        # Clean conflicting sources from Docker/Jupyter images
-        for f in /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia*; do
-            [ -f "$f" ] && { echo "[DEPS] Removing conflicting source: $f"; $SUDO rm -f "$f"; }
-        done
-        $SUDO rm -f /etc/apt/preferences.d/*cuda* /etc/apt/preferences.d/*nvidia* 2>/dev/null || true
+        # 4. Fallback: NVIDIA .run installer (works on any Linux, no repo needed)
+        if [ "$APT_OK" = false ]; then
+            echo "[DEPS] apt install failed or unavailable — falling back to NVIDIA .run installer"
 
-        # Detect Ubuntu version
-        UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.')
-        [ -z "$UBUNTU_VER" ] && UBUNTU_VER=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
-        [ -z "$UBUNTU_VER" ] && UBUNTU_VER="2204"
+            # Map driver CUDA version to closest .run installer URL
+            # Format: cuda_MAJOR.MINOR.PATCH_DRIVER_linux.run
+            # We use the .0 patch release for each minor version
+            CUDA_RUN_VER="${CUDA_MAJOR}.${CUDA_MINOR}.0"
+            case "${CUDA_MAJOR}.${CUDA_MINOR}" in
+                12.0) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.0.0/local_installers/cuda_12.0.0_525.60.13_linux.run" ;;
+                12.1) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_530.30.02_linux.run" ;;
+                12.2) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda_12.2.0_535.54.03_linux.run" ;;
+                12.3) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.3.0/local_installers/cuda_12.3.0_545.23.06_linux.run" ;;
+                12.4) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda_12.4.0_550.54.14_linux.run" ;;
+                12.5) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.5.0/local_installers/cuda_12.5.0_555.42.02_linux.run" ;;
+                12.6) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.6.0/local_installers/cuda_12.6.0_560.28.03_linux.run" ;;
+                12.8) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_570.86.10_linux.run" ;;
+                13.0) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_575.51.03_linux.run" ;;
+                13.1) CUDA_RUN_URL="https://developer.download.nvidia.com/compute/cuda/13.1.0/local_installers/cuda_13.1.0_575.57.08_linux.run" ;;
+                *)
+                    echo "CUDA_INSTALL_FAIL:no_run_url"
+                    echo "[DEPS] ERROR: No .run installer URL mapped for CUDA ${CUDA_MAJOR}.${CUDA_MINOR}"
+                    echo "[DEPS] Check https://developer.nvidia.com/cuda-toolkit-archive for the correct URL"
+                    exit 0
+                    ;;
+            esac
 
-        # Add NVIDIA repo
-        CUDA_DEB="cuda-keyring_1.1-1_all.deb"
-        CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/${CUDA_DEB}"
-        echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
-        wget -q "$CUDA_URL" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
-            $SUDO dpkg -i "/tmp/${CUDA_DEB}" && \
-            apt_safe update -qq
-
-        # Install EXACT matching toolkit — no fallback to generic (would install wrong version)
-        CUDA_PKG="cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
-        if apt_safe install -y "$CUDA_PKG"; then
-            echo "[DEPS] $CUDA_PKG installed successfully"
-        else
-            echo "[DEPS] $CUDA_PKG not available, trying cuda-toolkit-${CUDA_MAJOR}..."
-            # Try major-only (e.g., cuda-toolkit-12) as fallback within the same major
-            if apt_safe install -y "cuda-toolkit-${CUDA_MAJOR}"; then
-                echo "[DEPS] cuda-toolkit-${CUDA_MAJOR} installed"
+            echo "[DEPS] Downloading CUDA ${CUDA_MAJOR}.${CUDA_MINOR} .run installer (~4GB)..."
+            echo "[DEPS] URL: $CUDA_RUN_URL"
+            if wget -q --show-progress "$CUDA_RUN_URL" -O /tmp/cuda_installer.run 2>&1; then
+                chmod +x /tmp/cuda_installer.run
+                echo "[DEPS] Installing CUDA toolkit (--toolkit --silent)..."
+                if /tmp/cuda_installer.run --toolkit --silent --override 2>&1; then
+                    echo "[DEPS] .run installer completed"
+                else
+                    echo "CUDA_INSTALL_FAIL:run_failed"
+                    echo "[DEPS] ERROR: .run installer failed"
+                    rm -f /tmp/cuda_installer.run
+                    exit 0
+                fi
+                rm -f /tmp/cuda_installer.run
             else
-                echo "CUDA_INSTALL_FAIL:apt_failed"
-                echo "[DEPS] ERROR: Could not install CUDA toolkit for driver $DRIVER_CUDA_VER"
+                echo "CUDA_INSTALL_FAIL:download_failed"
+                echo "[DEPS] ERROR: Failed to download .run installer from $CUDA_RUN_URL"
                 exit 0
             fi
         fi
 
-        # 4. Update PATH and verify immediately (within same SSH session)
+        # 5. Update PATH and verify immediately (within same SSH session)
         for p in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
             [ -d "$p" ] && export PATH="$p:$PATH"
         done
@@ -536,14 +591,11 @@ CUDA_EOF
             *no_driver*)
                 err "No NVIDIA driver found (nvidia-smi failed). This machine cannot run CUDA miners."
                 ;;
-            *not_debian*)
-                err "Non-Debian system — automatic CUDA install not supported. Install manually."
-                ;;
-            *apt_failed*)
-                err "CUDA toolkit install failed via apt. Check the output above for details."
+            *apt_failed*|*run_failed*|*download_failed*|*no_run_url*)
+                err "CUDA toolkit install failed (both apt and .run). Details above."
                 ;;
             *nvcc_missing_after_install*)
-                err "CUDA toolkit package installed but nvcc not in PATH. Broken install."
+                err "CUDA toolkit installed but nvcc not in PATH. Broken install."
                 ;;
             *)
                 err "CUDA toolkit install failed: $CUDA_RESULT"
@@ -579,6 +631,15 @@ if ! should_skip 5; then
 
     run_remote_script <<BUILD_EOF
     cd ~/sha1-miner-gpu
+
+    # Clean CMake cache if CUDA compiler path changed (prevents stale cache pointing to wrong nvcc)
+    if [ -f build/CMakeCache.txt ]; then
+        CACHED_NVCC=\$(grep "CMAKE_CUDA_COMPILER:FILEPATH" build/CMakeCache.txt 2>/dev/null | cut -d= -f2)
+        if [ -n "\$CACHED_NVCC" ] && [ ! -f "\$CACHED_NVCC" ]; then
+            echo "[BUILD] Stale CMake cache: \$CACHED_NVCC no longer exists — cleaning build dir"
+            rm -rf build
+        fi
+    fi
 
     # Build
     echo "[BUILD] Building with: ./build.sh $BUILD_FLAG"
