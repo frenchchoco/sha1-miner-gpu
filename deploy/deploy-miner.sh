@@ -614,6 +614,63 @@ CUDA_EOF
 AMD_EOF
     fi
 
+    # CUDA compute smoke test — catches servers where nvidia-smi works but actual GPU compute is broken
+    if [[ "$GPU_TYPE" == "cuda" ]]; then
+        info "Running CUDA compute smoke test..."
+        SMOKE_RESULT=$(run_remote_script <<'SMOKE_EOF'
+        cat > /tmp/_cuda_smoke.c << 'CSRC'
+#include <stdio.h>
+#include <dlfcn.h>
+typedef int (*cuInit_t)(unsigned);
+typedef int (*cuCount_t)(int*);
+typedef int (*cuName_t)(char*,int,int);
+int main() {
+    void *lib = dlopen("libcuda.so.1", 2);
+    if (!lib) { printf("SMOKE_FAIL:no_libcuda"); return 0; }
+    int r = ((cuInit_t)dlsym(lib, "cuInit"))(0);
+    if (r != 0) { printf("SMOKE_FAIL:cuInit=%d", r); return 0; }
+    int n = 0;
+    ((cuCount_t)dlsym(lib, "cuDeviceGetCount"))(&n);
+    if (n <= 0) { printf("SMOKE_FAIL:no_devices"); return 0; }
+    printf("SMOKE_OK:devices=%d:", n);
+    cuName_t getName = (cuName_t)dlsym(lib, "cuDeviceGetName");
+    for (int i = 0; i < n; i++) {
+        char buf[256] = {0};
+        getName(buf, 256, i);
+        printf("%s%s", i > 0 ? "," : "", buf);
+    }
+    return 0;
+}
+CSRC
+        gcc -o /tmp/_cuda_smoke /tmp/_cuda_smoke.c -ldl 2>/dev/null && /tmp/_cuda_smoke
+        rm -f /tmp/_cuda_smoke /tmp/_cuda_smoke.c
+SMOKE_EOF
+        )
+        SMOKE_TAG=$(echo "$SMOKE_RESULT" | grep -o "SMOKE_[A-Z]*:[^ ]*")
+        case "$SMOKE_TAG" in
+            SMOKE_OK*)
+                success "CUDA compute verified: $SMOKE_TAG"
+                ;;
+            *cuInit=3*)
+                err "CUDA compute BROKEN on this server (cuInit=3). nvidia-smi works but GPU compute does not."
+                err "This is a host/container issue — cannot be fixed. Cancel this rental and pick another server."
+                ;;
+            *cuInit=*)
+                err "CUDA driver initialization failed: $SMOKE_TAG"
+                ;;
+            *no_libcuda*)
+                err "libcuda.so not found — NVIDIA driver not properly installed."
+                ;;
+            *no_devices*)
+                err "CUDA initialized but found 0 GPUs."
+                ;;
+            *)
+                warn "CUDA smoke test inconclusive: $SMOKE_RESULT"
+                warn "Continuing anyway — build may still work."
+                ;;
+        esac
+    fi
+
     success "Dependencies ready"
     mark_step 4
 fi
