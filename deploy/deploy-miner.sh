@@ -426,76 +426,127 @@ if ! should_skip 4; then
     echo "[DEPS] Checking GPU toolkit..."
 DEPS_EOF
 
-    # Install GPU-specific toolkit if missing
+    # Install GPU-specific toolkit if missing — strict version matching
     if [[ "$GPU_TYPE" == "cuda" ]]; then
-        run_remote_script <<'CUDA_EOF'
-        # Detect CUDA version supported by the driver
+        CUDA_INSTALL_RESULT=$(run_remote_script <<'CUDA_EOF'
+        # 1. Detect driver's max supported CUDA version
         DRIVER_CUDA_VER=""
         if command -v nvidia-smi &>/dev/null; then
             DRIVER_CUDA_VER=$(nvidia-smi 2>/dev/null | grep "CUDA Version" | sed 's/.*CUDA Version: //' | sed 's/ .*//')
         fi
 
+        if [ -z "$DRIVER_CUDA_VER" ]; then
+            echo "CUDA_INSTALL_FAIL:no_driver"
+            echo "[DEPS] ERROR: nvidia-smi not found or no CUDA version reported"
+            exit 0
+        fi
+
+        CUDA_MAJOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f1)
+        CUDA_MINOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f2)
+        echo "[DEPS] Driver supports CUDA $DRIVER_CUDA_VER (max)"
+
+        # 2. Check if nvcc already exists AND matches driver version
+        for p in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
+            [ -d "$p" ] && export PATH="$p:$PATH"
+        done
+
         if command -v nvcc &>/dev/null; then
-            CUDA_VER=$(nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
-            echo "[DEPS] CUDA toolkit already installed: $CUDA_VER"
-        else
-            echo "[DEPS] CUDA toolkit (nvcc) not found in PATH."
+            NVCC_VER=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+            NVCC_MAJOR=$(echo "$NVCC_VER" | cut -d. -f1)
+            NVCC_MINOR=$(echo "$NVCC_VER" | cut -d. -f2)
 
-            if [ -f /etc/debian_version ]; then
-                # Clean up conflicting CUDA sources from Docker images (PyTorch, Jupyter, etc.)
-                echo "[DEPS] Checking for conflicting CUDA apt sources..."
-                for f in /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia*; do
-                    if [ -f "$f" ]; then
-                        echo "[DEPS] Removing conflicting source: $f"
-                        $SUDO rm -f "$f"
-                    fi
-                done
-                $SUDO rm -f /etc/apt/preferences.d/*cuda* 2>/dev/null || true
-                $SUDO rm -f /etc/apt/preferences.d/*nvidia* 2>/dev/null || true
-
-                # Determine CUDA version to install
-                if [ -n "$DRIVER_CUDA_VER" ]; then
-                    CUDA_MAJOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f1)
-                    CUDA_MINOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f2)
-                    CUDA_PKG="cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
-                    echo "[DEPS] Driver supports CUDA $DRIVER_CUDA_VER, installing $CUDA_PKG..."
-                else
-                    CUDA_PKG="cuda-toolkit"
-                    echo "[DEPS] Cannot detect driver CUDA version, trying latest toolkit..."
-                fi
-
-                # Detect Ubuntu version — multiple fallbacks
-                UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.')
-                [ -z "$UBUNTU_VER" ] && UBUNTU_VER=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
-                [ -z "$UBUNTU_VER" ] && UBUNTU_VER="2204"
-
-                # Install cuda-keyring and toolkit
-                CUDA_DEB="cuda-keyring_1.1-1_all.deb"
-                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/${CUDA_DEB}"
-
-                echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
-                wget -q "$CUDA_URL" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
-                    $SUDO dpkg -i "/tmp/${CUDA_DEB}" && \
-                    apt_safe update -qq && \
-                    apt_safe install -y "$CUDA_PKG" && \
-                    echo "[DEPS] $CUDA_PKG installed successfully" || {
-                        echo "[DEPS] Specific toolkit failed, trying generic cuda-toolkit..."
-                        apt_safe install -y cuda-toolkit 2>/dev/null || {
-                            echo "[DEPS] NVIDIA repo failed, trying distro package..."
-                            apt_safe install -y nvidia-cuda-toolkit 2>/dev/null || \
-                                echo "[DEPS] WARNING: Could not install CUDA. Install manually: https://developer.nvidia.com/cuda-downloads"
-                        }
-                    }
-
-                # Update PATH after install
-                for p in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
-                    [ -d "$p" ] && export PATH="$p:$PATH"
-                done
+            if [ "$NVCC_MAJOR" -le "$CUDA_MAJOR" ] && { [ "$NVCC_MAJOR" -lt "$CUDA_MAJOR" ] || [ "$NVCC_MINOR" -le "$CUDA_MINOR" ]; }; then
+                echo "[DEPS] CUDA toolkit already installed and compatible: nvcc $NVCC_VER <= driver $DRIVER_CUDA_VER"
+                echo "CUDA_INSTALL_OK:existing=$NVCC_VER:driver=$DRIVER_CUDA_VER"
+                exit 0
             else
-                echo "[DEPS] Non-Debian system. Install CUDA manually: https://developer.nvidia.com/cuda-downloads"
+                echo "[DEPS] WARNING: Existing nvcc $NVCC_VER > driver $DRIVER_CUDA_VER — removing and reinstalling"
+                $SUDO apt-get remove -y --purge 'cuda-toolkit*' 'nvidia-cuda-toolkit*' 2>/dev/null || true
             fi
         fi
+
+        # 3. Install the toolkit matching the driver version (NEVER generic/latest)
+        echo "[DEPS] Installing cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}..."
+
+        if [ ! -f /etc/debian_version ]; then
+            echo "CUDA_INSTALL_FAIL:not_debian"
+            echo "[DEPS] ERROR: Non-Debian system. Install CUDA $DRIVER_CUDA_VER manually."
+            exit 0
+        fi
+
+        # Clean conflicting sources from Docker/Jupyter images
+        for f in /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia*; do
+            [ -f "$f" ] && { echo "[DEPS] Removing conflicting source: $f"; $SUDO rm -f "$f"; }
+        done
+        $SUDO rm -f /etc/apt/preferences.d/*cuda* /etc/apt/preferences.d/*nvidia* 2>/dev/null || true
+
+        # Detect Ubuntu version
+        UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.')
+        [ -z "$UBUNTU_VER" ] && UBUNTU_VER=$(grep VERSION_ID /etc/os-release 2>/dev/null | tr -dc '0-9')
+        [ -z "$UBUNTU_VER" ] && UBUNTU_VER="2204"
+
+        # Add NVIDIA repo
+        CUDA_DEB="cuda-keyring_1.1-1_all.deb"
+        CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/${CUDA_DEB}"
+        echo "[DEPS] Adding NVIDIA CUDA repo for Ubuntu ${UBUNTU_VER}..."
+        wget -q "$CUDA_URL" -O "/tmp/${CUDA_DEB}" 2>/dev/null && \
+            $SUDO dpkg -i "/tmp/${CUDA_DEB}" && \
+            apt_safe update -qq
+
+        # Install EXACT matching toolkit — no fallback to generic (would install wrong version)
+        CUDA_PKG="cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
+        if apt_safe install -y "$CUDA_PKG"; then
+            echo "[DEPS] $CUDA_PKG installed successfully"
+        else
+            echo "[DEPS] $CUDA_PKG not available, trying cuda-toolkit-${CUDA_MAJOR}..."
+            # Try major-only (e.g., cuda-toolkit-12) as fallback within the same major
+            if apt_safe install -y "cuda-toolkit-${CUDA_MAJOR}"; then
+                echo "[DEPS] cuda-toolkit-${CUDA_MAJOR} installed"
+            else
+                echo "CUDA_INSTALL_FAIL:apt_failed"
+                echo "[DEPS] ERROR: Could not install CUDA toolkit for driver $DRIVER_CUDA_VER"
+                exit 0
+            fi
+        fi
+
+        # 4. Update PATH and verify immediately (within same SSH session)
+        for p in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
+            [ -d "$p" ] && export PATH="$p:$PATH"
+        done
+
+        if command -v nvcc &>/dev/null; then
+            FINAL_VER=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+            echo "[DEPS] Verified: nvcc $FINAL_VER installed"
+            echo "CUDA_INSTALL_OK:installed=$FINAL_VER:driver=$DRIVER_CUDA_VER"
+        else
+            echo "CUDA_INSTALL_FAIL:nvcc_missing_after_install"
+            echo "[DEPS] ERROR: nvcc still not found after install"
+        fi
 CUDA_EOF
+        )
+        # Parse the result line
+        CUDA_RESULT=$(echo "$CUDA_INSTALL_RESULT" | grep "^CUDA_INSTALL_" | tail -1)
+
+        case "$CUDA_RESULT" in
+            CUDA_INSTALL_OK*)
+                success "CUDA toolkit: $CUDA_RESULT"
+                ;;
+            *no_driver*)
+                err "No NVIDIA driver found (nvidia-smi failed). This machine cannot run CUDA miners."
+                ;;
+            *not_debian*)
+                err "Non-Debian system — automatic CUDA install not supported. Install manually."
+                ;;
+            *apt_failed*)
+                err "CUDA toolkit install failed via apt. Check the output above for details."
+                ;;
+            *nvcc_missing_after_install*)
+                err "CUDA toolkit package installed but nvcc not in PATH. Broken install."
+                ;;
+            *)
+                err "CUDA toolkit install failed: $CUDA_RESULT"
+                ;;
+        esac
     elif [[ "$GPU_TYPE" == "amd" ]]; then
         run_remote_script <<'AMD_EOF'
         if [ -d /opt/rocm ]; then
@@ -508,6 +559,7 @@ CUDA_EOF
         fi
 AMD_EOF
     fi
+
     success "Dependencies ready"
     mark_step 4
 fi
@@ -709,9 +761,25 @@ header "Post-Deployment Health Check"
 info "Waiting for miner to initialize (up to 60s)..."
 
 HEALTH_OK=false
+HEALTH_FATAL=false
 for i in $(seq 1 12); do
     sleep 5
-    MINER_LOG=$(run_remote "tail -10 ~/miner.log 2>/dev/null" || echo "")
+    MINER_LOG=$(run_remote "tail -20 ~/miner.log 2>/dev/null" || echo "")
+
+    # Check for fatal GPU/CUDA errors first — no point waiting 60s
+    if echo "$MINER_LOG" | grep -qiE "CUDA driver version is insufficient|Failed to get GPU|no CUDA-capable device|CUDA error|Failed to initialize mining|out of memory"; then
+        err_msg=$(echo "$MINER_LOG" | grep -iE "CUDA driver|Failed to get GPU|no CUDA-capable|CUDA error|Failed to initialize|out of memory" | head -1)
+        echo
+        echo -e "${RED}[FATAL]${NC} GPU/CUDA error detected:"
+        echo -e "${RED}        $err_msg${NC}"
+        echo
+        warn "Full log:"
+        echo "$MINER_LOG" | tail -10
+        HEALTH_FATAL=true
+        break
+    fi
+
+    # Check for success
     if echo "$MINER_LOG" | grep -qiE "share|accepted|hashrate|MH/s|GH/s|connected.*pool"; then
         success "Miner is producing output!"
         echo "$MINER_LOG" | tail -3
@@ -721,7 +789,9 @@ for i in $(seq 1 12); do
     info "  Waiting... ($((i*5))s)"
 done
 
-if ! $HEALTH_OK; then
+if $HEALTH_FATAL; then
+    err "Miner failed to start due to GPU/CUDA error. Fix the issue and re-deploy with: $0 $REMOTE_HOST --ssh-port $SSH_PORT --from-step 4"
+elif ! $HEALTH_OK; then
     warn "Miner has not produced share output after 60s."
     warn "Check logs: ssh -p $SSH_PORT $REMOTE_HOST 'tail -50 ~/miner.log'"
 fi
