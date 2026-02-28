@@ -524,6 +524,8 @@ DEPS_EOF
         fi
 CUDA_EOF
         )
+        # Show full output so the user sees what happened (filter out the result tag)
+        echo "$CUDA_INSTALL_RESULT" | grep -v "^CUDA_INSTALL_"
         # Parse the result line
         CUDA_RESULT=$(echo "$CUDA_INSTALL_RESULT" | grep "^CUDA_INSTALL_" | tail -1)
 
